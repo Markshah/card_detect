@@ -120,8 +120,8 @@ def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, 
     a_ok = ws_arduino.is_connected
     t_color = GREEN if t_ok else RED
     a_color = GREEN if a_ok else RED
-    print(f"{BOLD}[WS]{RESET} tablet : {t_color}{TABLET_WS_URL}{RESET}   [{t_color}{'UP' if t_ok else 'DOWN'}{RESET}]")
-    print(f"{BOLD}[WS]{RESET} arduino: {a_color}{ARDUINO_WS_URL}{RESET}   [{a_color}{'UP' if a_ok else 'DOWN'}{RESET}]")
+    print(f"{BOLD}[WS]{RESET} Tablet : {t_color}{TABLET_WS_URL}{RESET}   [{t_color}{'UP' if t_ok else 'DOWN'}{RESET}]")
+    print(f"{BOLD}[WS]{RESET} Arduino: {a_color}{ARDUINO_WS_URL}{RESET}   [{a_color}{'UP' if a_ok else 'DOWN'}{RESET}]")
 
     # Config snapshot
     print(f"{GRAY}[CFG]{RESET} CAMERA={CAMERA_INDEX} ROI={ROI} LOOP={SLEEP_SEC:.2f}s GRAY_ONLY={USE_GRAYSCALE_ONLY}")
@@ -168,8 +168,8 @@ def _startup_summary():
     # give each connection a moment to come up
     t_ok = ws_tablet.wait_connected(2.0)
     a_ok = ws_arduino.wait_connected(2.0)
-    log_event(f"tablet {'connected' if t_ok else 'pending'}")
-    log_event(f"arduino {'connected' if a_ok else 'pending'}")
+    log_event(f"Tablet {'connected' if t_ok else 'pending'}")
+    log_event(f"Arduino {'connected' if a_ok else 'pending'}")
 
 def print_ws_status():
     """Display WebSocket connection statuses in color."""
