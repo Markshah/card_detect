@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# rim_only_ws.py — face-up/down by white rim + arming/reset + WS sends
+# card_detect.py — face-up/down by white rim + arming/reset + dual-WS sends
 import os, cv2, time, json, atexit, numpy as np
 from dotenv import load_dotenv
 
@@ -20,8 +20,6 @@ SAVE_IMAGES = int(os.getenv("SAVE_IMAGES", "0"))   # 0=off, 1=on
 SAVE_WARPS  = int(os.getenv("SAVE_WARPS", "0"))    # 0=off, 1=on
 SAVE_GRAYSCALE = int(os.getenv("SAVE_GRAYSCALE", "0"))  # 0=off, 1=save grayscale frames
 
-
-
 # ---- rim classifier knobs (env-tunable) ----
 RIM_OUTER_FRAC   = float(os.getenv("RIM_OUTER_FRAC", "0.08"))
 RIM_INNER_FRAC   = float(os.getenv("RIM_INNER_FRAC", "0.30"))
@@ -38,7 +36,6 @@ CARD_SHORTSIDE_MIN = int(os.getenv("CARD_SHORTSIDE_MIN","90"))
 ASPECT_MIN, ASPECT_MAX = float(os.getenv("ASPECT_MIN","1.25")), float(os.getenv("ASPECT_MAX","1.75"))
 SOLIDITY_MIN = float(os.getenv("SOLIDITY_MIN","0.88"))
 FILL_OBB_MIN = float(os.getenv("FILL_OBB_MIN","0.80"))
-POLY_EPS     = float(os.getenv("POLY_EPS","0.02"))
 ANGLE_TOL_DEG= float(os.getenv("ANGLE_TOL_DEG","16"))
 
 # absolute pixel gates (stable in a fixed rig)
@@ -51,19 +48,22 @@ CARD_LONG_MAX_PX  = int(os.getenv("CARD_LONG_MAX_PX",  "380"))
 ARM_CONSEC_N       = int(os.getenv("ARM_CONSEC_N", "3"))
 ARM_FACEUP_MIN     = int(os.getenv("ARM_FACEUP_MIN", "2"))
 
-# NEW: reset only after seeing zero face-up for N consecutive loops (default 3)
+# reset only after seeing zero face-up for N consecutive loops (default 3)
 ZERO_UP_CONSEC_N   = int(os.getenv("ZERO_UP_CONSEC_N", "3"))
 
 # send policy
 RESEND_EVERY       = int(os.getenv("RESEND_EVERY", "5"))  # periodic same-value push
-
 USE_GRAYSCALE_ONLY = int(os.getenv("USE_GRAYSCALE_ONLY","1"))
 
+# ---- websocket (DUAL DESTINATIONS) ----
+from ws_mgr import WSManager
 
+# Tablet: receives cards_detected
+TABLET_WS_URL  = os.getenv("TABLET_WS_URL",  "ws://192.168.1.246:8765").strip()
+# Arduino: receives move_dealer_forward
+ARDUINO_WS_URL = os.getenv("ARDUINO_WS_URL", "ws://192.168.1.245:8888").strip()
 
-# ---- websocket ----
-from wsmgr import WSManager
-WS_URL              = os.getenv("WS_URL","ws://192.168.1.245:8888").strip()
+# burst/timeout knobs for Arduino reset command
 WS_BURST_SENDS      = int(os.getenv("WS_BURST_SENDS", "1"))
 WS_BURST_SPACING_MS = int(os.getenv("WS_BURST_SPACING_MS", "40"))
 WS_SEND_RETRIES     = int(os.getenv("WS_SEND_RETRIES", "4"))
@@ -71,9 +71,13 @@ WS_RETRY_DELAY_MS   = int(os.getenv("WS_RETRY_DELAY_MS", "150"))
 WS_AWAIT_CONNECT_S  = float(os.getenv("WS_AWAIT_CONNECT_SEC", "1.5"))
 RESET_DEBOUNCE_SEC  = float(os.getenv("RESET_DEBOUNCE_SEC", "1.2"))
 
-ws_mgr = WSManager(url=WS_URL)
-ws_mgr.start()
-atexit.register(lambda: ws_mgr.stop())
+# Two persistent sockets
+ws_tablet  = WSManager(url=TABLET_WS_URL)
+ws_arduino = WSManager(url=ARDUINO_WS_URL)
+
+ws_tablet.start()
+ws_arduino.start()
+atexit.register(lambda: (ws_tablet.stop(), ws_arduino.stop()))
 
 # -------------- helpers --------------
 def _roi(frame, r):
@@ -215,42 +219,42 @@ _same_streak = 0
 _last_reset_ts = 0.0
 
 def send_cards_change_or_every(count: int):
-    """Send {'command':'cards_detected'} on change or every RESEND_EVERY identical reads."""
+    """Send {'command':'cards_detected'} on change or every RESEND_EVERY identical reads (to TABLET)."""
     global _last_obs, _same_streak
     count = int(count)
     if _last_obs is None or count != _last_obs:
         _last_obs = count; _same_streak = 1
-        ws_mgr.send_cards_detected(count)
-        print(f"[ws] cards_detected -> {count} (changed)")
+        ws_tablet.send_cards_detected(count)
+        print(f"[ws→tablet] cards_detected -> {count} (changed)")
         return True
     _same_streak += 1
     if _same_streak >= RESEND_EVERY:
         _same_streak = 0
-        ws_mgr.send_cards_detected(count)
-        print(f"[ws] cards_detected -> {count} (periodic)")
+        ws_tablet.send_cards_detected(count)
+        print(f"[ws→tablet] cards_detected -> {count} (periodic)")
         return True
     return False
 
 def send_reset_reliably():
-    """Debounced, retried, bursty reset → move_dealer_forward."""
+    """Debounced, retried, bursty reset → move_dealer_forward (to ARDUINO)."""
     global _last_reset_ts
     now = time.time()
     if now - _last_reset_ts < RESET_DEBOUNCE_SEC:
-        print(f"[ws] debounce: skip reset ({now - _last_reset_ts:.2f}s)"); return False
+        print(f"[ws→arduino] debounce: skip reset ({now - _last_reset_ts:.2f}s)"); return False
 
-    ws_mgr.wait_connected(WS_AWAIT_CONNECT_S)
+    ws_arduino.wait_connected(WS_AWAIT_CONNECT_S)
     ok = False
     for attempt in range(1, WS_SEND_RETRIES+1):
-        ok = ws_mgr.send_move_dealer_forward_burst(
+        ok = ws_arduino.send_move_dealer_forward_burst(
             burst=WS_BURST_SENDS, spacing_ms=WS_BURST_SPACING_MS
         )
         if ok:
-            print(f"[ws] reset sent (attempt {attempt}/{WS_SEND_RETRIES})"); break
-        print(f"[ws] send failed; retrying in {WS_RETRY_DELAY_MS} ms (attempt {attempt}/{WS_SEND_RETRIES})")
+            print(f"[ws→arduino] reset sent (attempt {attempt}/{WS_SEND_RETRIES})"); break
+        print(f"[ws→arduino] send failed; retrying in {WS_RETRY_DELAY_MS} ms (attempt {attempt}/{WS_SEND_RETRIES})")
         time.sleep(WS_RETRY_DELAY_MS/1000.0)
 
     if ok: _last_reset_ts = time.time()
-    else: print("[ws] ERROR: failed to send reset after retries")
+    else: print("[ws→arduino] ERROR: failed to send reset after retries")
     return ok
 
 # -------------- main --------------
@@ -262,7 +266,7 @@ def main():
     if not cap.isOpened():
         print("[ERROR] camera not found"); return
 
-    print("[INFO] Rim-only + WS running (zero-up reset).")
+    print("[INFO] Rim-only + dual-WS running (tablet: cards, arduino: reset).")
 
     # streak state
     armed = False
@@ -306,7 +310,7 @@ def main():
                 peak_up = face_up_now
                 print(f"[state] ARMED (need {ARM_FACEUP_MIN}+ for {ARM_CONSEC_N} loops)")
         else:
-            # NEW: only track streak of "zero face-up"
+            # only track streak of "zero face-up"
             if face_up_now == 0:
                 zero_up_streak += 1
             else:
@@ -343,7 +347,6 @@ def main():
         if SAVE_GRAYSCALE:
             gray_path = os.path.join(SAVE_DIR, f"gray_{ts}.jpg")
             cv2.imwrite(gray_path, norm)
-
 
         time.sleep(SLEEP_SEC)
 
