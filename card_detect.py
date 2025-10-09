@@ -113,18 +113,18 @@ def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, 
     GRAY   = "\033[90m"
 
     # Header
-    print(f"{BOLD}{CYAN}=== WED NIGHT POKER — CARD DETECT (static console) ==={RESET}")
+    print(f"{BOLD}{CYAN}=== WED NIGHT POKER — CARD DETECT ==={RESET}")
 
     # Live WS status
     t_ok = ws_tablet.is_connected
     a_ok = ws_arduino.is_connected
     t_color = GREEN if t_ok else RED
     a_color = GREEN if a_ok else RED
-    print(f"{BOLD}[WS]{RESET} Tablet : {t_color}{TABLET_WS_URL}{RESET}   [{t_color}{'UP' if t_ok else 'DOWN'}{RESET}]")
-    print(f"{BOLD}[WS]{RESET} Arduino: {a_color}{ARDUINO_WS_URL}{RESET}   [{a_color}{'UP' if a_ok else 'DOWN'}{RESET}]")
+    print(f"{BOLD}Tablet : {t_color}{TABLET_WS_URL}{RESET}   [{t_color}{'UP' if t_ok else 'DOWN'}{RESET}]")
+    print(f"{BOLD}Arduino: {a_color}{ARDUINO_WS_URL}{RESET}   [{a_color}{'UP' if a_ok else 'DOWN'}{RESET}]")
 
     # Config snapshot
-    print(f"{GRAY}[CFG]{RESET} CAMERA={CAMERA_INDEX} ROI={ROI} LOOP={SLEEP_SEC:.2f}s GRAY_ONLY={USE_GRAYSCALE_ONLY}")
+    print(f" {GRAY}[CFG]{RESET} CAMERA={CAMERA_INDEX} ROI={ROI} LOOP={SLEEP_SEC:.2f}s GRAY_ONLY={USE_GRAYSCALE_ONLY}")
 
     # Live state (ARMED green / RESET yellow / IDLE red)
     if armed:
@@ -136,7 +136,7 @@ def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, 
 
     down_now = max(0, cards_now - face_up_now)
     print(
-        f"{BOLD}[LIVE]{RESET} cards={CYAN}{cards_now}{RESET} "
+        f" {BOLD}[LIVE]{RESET} cards={CYAN}{cards_now}{RESET} "
         f"up={CYAN}{face_up_now}{RESET} down={GRAY}{down_now}{RESET}  "
         f"state={state_txt}  "
         f"arm_streak={arm_streak}/{ARM_CONSEC_N}  "
