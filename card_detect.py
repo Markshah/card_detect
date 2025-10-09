@@ -126,18 +126,18 @@ def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, 
     # Config snapshot
     print(f" {GRAY}[CFG]{RESET} CAMERA={CAMERA_INDEX} ROI={ROI} LOOP={SLEEP_SEC:.2f}s GRAY_ONLY={USE_GRAYSCALE_ONLY}")
 
-    # Live state (ARMED green / RESET yellow / IDLE red)
+    # Live state
     if armed:
         state_txt = f"{GREEN}ARMED{RESET}"
     elif zero_up_streak >= ZERO_UP_CONSEC_N:
         state_txt = f"{YELLOW}RESET{RESET}"
     else:
-        state_txt = f"{RED}IDLE{RESET}"
+        state_txt = f"{YELLOW}IDLE{RESET}"
 
     down_now = max(0, cards_now - face_up_now)
     print(
-        f" {BOLD}[LIVE]{RESET} cards={CYAN}{cards_now}{RESET} "
-        f"up={CYAN}{face_up_now}{RESET} down={GRAY}{down_now}{RESET}  "
+        f" {BOLD}[LIVE]{RESET} cards={YELLOW}{cards_now}{RESET} "
+        f"up={GREEN}{face_up_now}{RESET} down={RED}{down_now}{RESET}  "
         f"state={state_txt}  "
         f"arm_streak={arm_streak}/{ARM_CONSEC_N}  "
         f"zero_streak={zero_up_streak}/{ZERO_UP_CONSEC_N}  "
