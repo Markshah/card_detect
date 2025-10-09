@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-# card_detect.py — face-up/down by white rim + arming/reset + dual-WS sends
-import os, cv2, time, json, atexit, numpy as np
+# card_detect.py — face-up/down by white rim + arming/reset + dual-WS sends + static console dashboard
+import os, sys, cv2, time, json, atexit, numpy as np, logging
+from collections import deque
 from dotenv import load_dotenv
 
 # ---------------- env ----------------
@@ -12,6 +13,9 @@ def _get_csv_ints(name, default="0,0,0,0"):
     raw = raw.split("#", 1)[0].strip().strip('"').strip("'")
     parts = [p.strip() for p in raw.split(",")]
     return tuple(int(p or "0") for p in parts[:4]) if len(parts) >= 4 else (0,0,0,0)
+
+QUIET_LOGS = _b("QUIET_LOGS", "1")  # keeps dashboard static by muting noisy INFO logs
+DASH_ROWS  = int(os.getenv("DASH_ROWS", "6"))  # recent event lines to keep
 
 # ---- camera / I/O ----
 CAMERA_INDEX = int(os.getenv("CAMERA_INDEX", "0"))
@@ -72,22 +76,60 @@ WS_RETRY_DELAY_MS   = int(os.getenv("WS_RETRY_DELAY_MS", "150"))
 WS_AWAIT_CONNECT_S  = float(os.getenv("WS_AWAIT_CONNECT_SEC", "1.5"))
 RESET_DEBOUNCE_SEC  = float(os.getenv("RESET_DEBOUNCE_SEC", "1.2"))
 
-# Two persistent sockets + startup summary
+# ---- logging quiet mode ----
+if QUIET_LOGS:
+    logging.getLogger().setLevel(logging.WARNING)
+    logging.getLogger("websocket").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+# Two persistent sockets
 ws_tablet  = WSManager(url=TABLET_WS_URL)
 ws_arduino = WSManager(url=ARDUINO_WS_URL)
 ws_tablet.start()
 ws_arduino.start()
 atexit.register(lambda: (ws_tablet.stop(), ws_arduino.stop()))
 
+# ---------------- dashboard helpers ----------------
+events = deque(maxlen=DASH_ROWS)
+
+def log_event(s: str):
+    ts = time.strftime("%H:%M:%S")
+    events.appendleft(f"{ts}  {s}")
+
+def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up):
+    # ANSI: clear screen + home cursor
+    sys.stdout.write("\033[2J\033[H")
+    # Header
+    print("=== WED NIGHT POKER — CARD DETECT (static console) ===")
+    # Connections
+    t_ok = ws_tablet.is_connected
+    a_ok = ws_arduino.is_connected
+    print(f"[WS] tablet : {TABLET_WS_URL}   [{'UP' if t_ok else '...'}]")
+    print(f"[WS] arduino: {ARDUINO_WS_URL}   [{'UP' if a_ok else '...'}]")
+    # Config snapshot
+    print(f"[CFG] CAMERA={CAMERA_INDEX}  ROI={ROI}  LOOP={SLEEP_SEC:.2f}s  GRAY_ONLY={USE_GRAYSCALE_ONLY}")
+    # Live stats
+    print(f"[LIVE] cards={cards_now}  up={face_up_now}  down={max(0, cards_now - face_up_now)}  "
+          f"state={'ARMED' if armed else 'IDLE'}  arm_streak={arm_streak}/{ARM_CONSEC_N}  "
+          f"zero_streak={zero_up_streak}/{ZERO_UP_CONSEC_N}  peak_up={peak_up}")
+    # Events pane
+    print("-" * 72)
+    print("Recent events:")
+    if events:
+        for line in list(events):
+            print("  " + line)
+    else:
+        print("  (none)")
+    sys.stdout.flush()
+
 def _startup_summary():
+    # give each connection a moment to come up
     t_ok = ws_tablet.wait_connected(2.0)
     a_ok = ws_arduino.wait_connected(2.0)
-    print("[WS] tablet:", TABLET_WS_URL, "connected" if t_ok else "pending")
-    print("[WS] arduino:", ARDUINO_WS_URL, "connected" if a_ok else "pending")
-    print("[CFG] CAMERA_INDEX=", CAMERA_INDEX, " ROI=", ROI, " SLEEP_SEC=", SLEEP_SEC)
-    print("[CFG] FACEUP_WHITE_MIN=", FACEUP_WHITE_MIN, " RIM_EDGE_MAX=", RIM_EDGE_MAX, " CENTER_EDGE_MAX=", CENTER_EDGE_MAX)
+    log_event(f"tablet {'connected' if t_ok else 'pending'}")
+    log_event(f"arduino {'connected' if a_ok else 'pending'}")
 
-# -------------- helpers --------------
+# -------------- vision helpers --------------
 def _roi(frame, r):
     x,y,w,h = r
     if w <= 0 or h <= 0: return frame, 0, 0
@@ -233,13 +275,13 @@ def send_cards_change_or_every(count: int):
     if _last_obs is None or count != _last_obs:
         _last_obs = count; _same_streak = 1
         ws_tablet.send_cards_detected(count)
-        print(f"[ws→tablet] cards_detected -> {count} (changed)")
+        log_event(f"cards_detected -> {count} (changed)")
         return True
     _same_streak += 1
     if _same_streak >= RESEND_EVERY:
         _same_streak = 0
         ws_tablet.send_cards_detected(count)
-        print(f"[ws→tablet] cards_detected -> {count} (periodic)")
+        log_event(f"cards_detected -> {count} (periodic)")
         return True
     return False
 
@@ -248,7 +290,8 @@ def send_reset_reliably():
     global _last_reset_ts
     now = time.time()
     if now - _last_reset_ts < RESET_DEBOUNCE_SEC:
-        print(f"[ws→arduino] debounce: skip reset ({now - _last_reset_ts:.2f}s)"); return False
+        log_event(f"reset skipped (debounce {now - _last_reset_ts:.1f}s)")
+        return False
 
     ws_arduino.wait_connected(WS_AWAIT_CONNECT_S)
     ok = False
@@ -257,12 +300,13 @@ def send_reset_reliably():
             burst=WS_BURST_SENDS, spacing_ms=WS_BURST_SPACING_MS
         )
         if ok:
-            print(f"[ws→arduino] reset sent (attempt {attempt}/{WS_SEND_RETRIES})"); break
-        print(f"[ws→arduino] send failed; retrying in {WS_RETRY_DELAY_MS} ms (attempt {attempt}/{WS_SEND_RETRIES})")
+            log_event(f"reset sent (attempt {attempt}/{WS_SEND_RETRIES})")
+            break
+        log_event(f"reset retry {attempt}/{WS_SEND_RETRIES} in {WS_RETRY_DELAY_MS}ms")
         time.sleep(WS_RETRY_DELAY_MS/1000.0)
 
     if ok: _last_reset_ts = time.time()
-    else: print("[ws→arduino] ERROR: failed to send reset after retries")
+    else:  log_event("reset FAILED after retries")
     return ok
 
 # -------------- main --------------
@@ -272,10 +316,11 @@ def main():
 
     cap = cv2.VideoCapture(CAMERA_INDEX)
     if not cap.isOpened():
-        print("[ERROR] camera not found"); return
+        print("[ERROR] camera not found")
+        return
 
     _startup_summary()
-    print("[INFO] Rim-only + dual-WS running (tablet: cards, arduino: reset).")
+    log_event("loop starting")
 
     # streak state
     armed = False
@@ -287,7 +332,9 @@ def main():
         ts = time.strftime("%Y%m%d-%H%M%S")
         ok, frame = cap.read()
         if not ok:
-            time.sleep(SLEEP_SEC); continue
+            time.sleep(SLEEP_SEC)
+            render_dashboard(0, 0, armed, arm_streak, zero_up_streak, peak_up)
+            continue
 
         proc, offx, offy = _roi(frame, ROI) if sum(ROI) != 0 else (frame, 0, 0)
 
@@ -304,8 +351,6 @@ def main():
         face_up_now = sum(1 for c in cards if c[0] == "face_up")
         cards_now   = len(cards)
         peak_up     = max(peak_up, face_up_now)
-        print(f"[{ts}] cards={cards_now} up={face_up_now} down={cards_now - face_up_now}   ", end="\r", flush=True)
-
 
         # --- arming/reset state machine ---
         if not armed:
@@ -318,16 +363,15 @@ def main():
                 send_cards_change_or_every(face_up_now)
                 zero_up_streak = 0
                 peak_up = face_up_now
-                print(f"[state] ARMED (need {ARM_FACEUP_MIN}+ for {ARM_CONSEC_N} loops)")
+                log_event(f"STATE -> ARMED (need {ARM_FACEUP_MIN}+ for {ARM_CONSEC_N})")
         else:
-            # only track streak of "zero face-up"
             if face_up_now == 0:
                 zero_up_streak += 1
             else:
                 zero_up_streak = 0
 
             if zero_up_streak >= ZERO_UP_CONSEC_N:
-                print(f"[state] RESET (stable zero-up for {ZERO_UP_CONSEC_N} loops, peak_up={peak_up})")
+                log_event(f"STATE -> RESET (zero-up for {ZERO_UP_CONSEC_N}, peak={peak_up})")
                 send_cards_change_or_every(0)
                 send_reset_reliably()
                 armed = False
@@ -337,7 +381,7 @@ def main():
             else:
                 send_cards_change_or_every(face_up_now)
 
-        # annotate & save
+        # annotate & optional saves
         for idx, (label, info, box, panel) in enumerate(cards):
             color = (0,255,0) if label=="face_up" else (0,0,255)
             box = (box + np.array([[offx,offy]], dtype=np.float32)).astype(int)
@@ -358,6 +402,8 @@ def main():
             gray_path = os.path.join(SAVE_DIR, f"gray_{ts}.jpg")
             cv2.imwrite(gray_path, norm)
 
+        # draw dashboard last
+        render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up)
         time.sleep(SLEEP_SEC)
 
 if __name__ == "__main__":

@@ -68,13 +68,10 @@ class WSManager:
         return self._connected.wait(timeout)
 
     def send_cards_detected(self, count: int) -> bool:
-
         """Send: {"command":"cards_detected", "data": {"count": N}}"""
         return self.send_json({
             "command": "cards_detected",
-            "data": {
-                "count": int(count)
-            }
+            "data": {"count": int(count)}
         })
 
     def send_move_dealer_forward(self) -> bool:
@@ -108,6 +105,7 @@ class WSManager:
 
     # ---- Internals ---------------------------------------------------------
     def _run_forever(self):
+        import random
         while self._should_run.is_set():
             try:
                 self._ws = WebSocketApp(
@@ -130,7 +128,7 @@ class WSManager:
                 break
 
             self._retry_count += 1
-            delay = self._jitter(self.retry_delay, self._retry_count)
+            delay = self.retry_delay * min(5, 1 + 0.25 * self._retry_count) * (0.75 + 0.5 * random.random())
             logging.info("Retrying websocket in %.1fs (attempt %d/%d)...", delay, self._retry_count, self.max_retries)
             time.sleep(delay)
 
@@ -143,12 +141,6 @@ class WSManager:
                 except Exception:
                     pass
             self._hb_stop.wait(max(1, self._hb_interval))
-
-    @staticmethod
-    def _jitter(base: float, n: int) -> float:
-        # small backoff + jitter (prevents reconnect storms)
-        import random
-        return base * min(5, 1 + 0.25 * n) * (0.75 + 0.5 * random.random())
 
     # ---- Event handlers ----------------------------------------------------
     def _on_open(self, ws):
