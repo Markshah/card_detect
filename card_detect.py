@@ -304,7 +304,8 @@ def main():
         face_up_now = sum(1 for c in cards if c[0] == "face_up")
         cards_now   = len(cards)
         peak_up     = max(peak_up, face_up_now)
-        print(f"[{ts}] cards={cards_now} up={face_up_now} down={cards_now - face_up_now}", flush=True)
+        print(f"[{ts}] cards={cards_now} up={face_up_now} down={cards_now - face_up_now}   ", end="\r", flush=True)
+
 
         # --- arming/reset state machine ---
         if not armed:
