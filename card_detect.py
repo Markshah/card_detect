@@ -96,31 +96,73 @@ def log_event(s: str):
     ts = time.strftime("%H:%M:%S")
     events.appendleft(f"{ts}  {s}")
 
+
 def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up):
-    # ANSI: clear screen + home cursor
-    sys.stdout.write("\033[2J\033[H")
+    import sys
+    sys.stdout.write("\033[2J\033[H")  # clear + home
+
+    # ANSI colors
+    RESET  = "\033[0m"
+    BOLD   = "\033[1m"
+    BLUE   = "\033[1;34m"
+    GREEN  = "\033[1;32m"
+    RED    = "\033[1;31m"
+    YELLOW = "\033[1;33m"
+    CYAN   = "\033[36m"
+    MAG    = "\033[35m"
+    GRAY   = "\033[90m"
+
     # Header
-    print("=== WED NIGHT POKER — CARD DETECT (static console) ===")
-    # Connections
+    print(f"{BOLD}{CYAN}=== WED NIGHT POKER — CARD DETECT (static console) ==={RESET}")
+
+    # Live WS status
     t_ok = ws_tablet.is_connected
     a_ok = ws_arduino.is_connected
-    print(f"[WS] tablet : {TABLET_WS_URL}   [{'UP' if t_ok else '...'}]")
-    print(f"[WS] arduino: {ARDUINO_WS_URL}   [{'UP' if a_ok else '...'}]")
+    t_color = GREEN if t_ok else RED
+    a_color = GREEN if a_ok else RED
+    print(f"{BOLD}[WS]{RESET} tablet : {t_color}{TABLET_WS_URL}{RESET}   [{t_color}{'UP' if t_ok else 'DOWN'}{RESET}]")
+    print(f"{BOLD}[WS]{RESET} arduino: {a_color}{ARDUINO_WS_URL}{RESET}   [{a_color}{'UP' if a_ok else 'DOWN'}{RESET}]")
+
     # Config snapshot
-    print(f"[CFG] CAMERA={CAMERA_INDEX}  ROI={ROI}  LOOP={SLEEP_SEC:.2f}s  GRAY_ONLY={USE_GRAYSCALE_ONLY}")
-    # Live stats
-    print(f"[LIVE] cards={cards_now}  up={face_up_now}  down={max(0, cards_now - face_up_now)}  "
-          f"state={'ARMED' if armed else 'IDLE'}  arm_streak={arm_streak}/{ARM_CONSEC_N}  "
-          f"zero_streak={zero_up_streak}/{ZERO_UP_CONSEC_N}  peak_up={peak_up}")
-    # Events pane
-    print("-" * 72)
+    print(f"{GRAY}[CFG]{RESET} CAMERA={CAMERA_INDEX} ROI={ROI} LOOP={SLEEP_SEC:.2f}s GRAY_ONLY={USE_GRAYSCALE_ONLY}")
+
+    # Live state (ARMED green / RESET yellow / IDLE red)
+    if armed:
+        state_txt = f"{GREEN}ARMED{RESET}"
+    elif zero_up_streak >= ZERO_UP_CONSEC_N:
+        state_txt = f"{YELLOW}RESET{RESET}"
+    else:
+        state_txt = f"{RED}IDLE{RESET}"
+
+    down_now = max(0, cards_now - face_up_now)
+    print(
+        f"{BOLD}[LIVE]{RESET} cards={CYAN}{cards_now}{RESET} "
+        f"up={CYAN}{face_up_now}{RESET} down={GRAY}{down_now}{RESET}  "
+        f"state={state_txt}  "
+        f"arm_streak={arm_streak}/{ARM_CONSEC_N}  "
+        f"zero_streak={zero_up_streak}/{ZERO_UP_CONSEC_N}  "
+        f"peak_up={peak_up}"
+    )
+
+    # Divider + events
+    print(f"{GRAY}" + "-" * 72 + f"{RESET}")
     print("Recent events:")
     if events:
         for line in list(events):
-            print("  " + line)
+            if "ARMED" in line:
+                color = GREEN
+            elif "RESET" in line:
+                color = YELLOW
+            elif "failed" in line or "error" in line.lower():
+                color = RED
+            else:
+                color = GRAY
+            print("  " + color + line + RESET)
     else:
         print("  (none)")
+
     sys.stdout.flush()
+
 
 def _startup_summary():
     # give each connection a moment to come up
@@ -128,6 +170,22 @@ def _startup_summary():
     a_ok = ws_arduino.wait_connected(2.0)
     log_event(f"tablet {'connected' if t_ok else 'pending'}")
     log_event(f"arduino {'connected' if a_ok else 'pending'}")
+
+def print_ws_status():
+    """Display WebSocket connection statuses in color."""
+    reset = "\033[0m"
+    green = "\033[1;32m"
+    red   = "\033[1;31m"
+    bold  = "\033[1m"
+
+    t_ok = ws_tablet.is_connected
+    a_ok = ws_arduino.is_connected
+
+    t_color = green if t_ok else red
+    a_color = green if a_ok else red
+
+    print(f"{bold}[WS]{reset} tablet : {t_color}{TABLET_WS_URL}{reset}   [{t_color}{'UP' if t_ok else 'DOWN'}{reset}]")
+    print(f"{bold}[WS]{reset} arduino: {a_color}{ARDUINO_WS_URL}{reset}   [{a_color}{'UP' if a_ok else 'DOWN'}{reset}]")
 
 # -------------- vision helpers --------------
 def _roi(frame, r):
@@ -320,6 +378,7 @@ def main():
         return
 
     _startup_summary()
+
     log_event("loop starting")
 
     # streak state
