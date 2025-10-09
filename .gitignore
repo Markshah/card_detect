@@ -1,0 +1,21 @@
+# python
+.venv/
+__pycache__/
+*.pyc
+
+# os junk
+.DS_Store
+
+# local data / outputs
+frames/
+
+# secrets and env
+env
+lastWorking/env
+oldStuff/env
+oldStuff/bwLastWorking/env
+# any other secret-y files or folders you use:
+*.key
+*.pem
+*.crt
+*.p12
