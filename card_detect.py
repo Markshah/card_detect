@@ -7,9 +7,15 @@ from dotenv import load_dotenv
 if os.path.exists("env"): load_dotenv("env")
 def _b(k, d="0"): return os.getenv(k, d).strip().lower() in ("1","true","yes")
 
+def _get_csv_ints(name, default="0,0,0,0"):
+    raw = os.getenv(name, default)
+    raw = raw.split("#", 1)[0].strip().strip('"').strip("'")
+    parts = [p.strip() for p in raw.split(",")]
+    return tuple(int(p or "0") for p in parts[:4]) if len(parts) >= 4 else (0,0,0,0)
+
 # ---- camera / I/O ----
 CAMERA_INDEX = int(os.getenv("CAMERA_INDEX", "0"))
-ROI          = tuple(map(int, os.getenv("ROI", "0,0,0,0").split(",")))  # x,y,w,h; 0s = full frame
+ROI          = _get_csv_ints("ROI", "0,0,0,0")  # x,y,w,h; 0s = full frame
 SLEEP_SEC    = float(os.getenv("FIXED_LOOP_INTERVAL_SECONDS", "1.0"))
 SAVE_DIR     = os.getenv("SAVE_FRAME_DIR", "./frames")
 DEBUG_DIR    = os.getenv("DEBUG_DUMP_DIR", "./debug")
@@ -47,9 +53,7 @@ CARD_LONG_MAX_PX  = int(os.getenv("CARD_LONG_MAX_PX",  "380"))
 # ---- arming / reset policy ----
 ARM_CONSEC_N       = int(os.getenv("ARM_CONSEC_N", "3"))
 ARM_FACEUP_MIN     = int(os.getenv("ARM_FACEUP_MIN", "2"))
-
-# reset only after seeing zero face-up for N consecutive loops (default 3)
-ZERO_UP_CONSEC_N   = int(os.getenv("ZERO_UP_CONSEC_N", "3"))
+ZERO_UP_CONSEC_N   = int(os.getenv("ZERO_UP_CONSEC_N", "3"))  # reset only after N consecutive zero-up loops
 
 # send policy
 RESEND_EVERY       = int(os.getenv("RESEND_EVERY", "5"))  # periodic same-value push
@@ -57,11 +61,8 @@ USE_GRAYSCALE_ONLY = int(os.getenv("USE_GRAYSCALE_ONLY","1"))
 
 # ---- websocket (DUAL DESTINATIONS) ----
 from ws_mgr import WSManager
-
-# Tablet: receives cards_detected
-TABLET_WS_URL  = os.getenv("TABLET_WS_URL",  "ws://192.168.1.246:8765").strip()
-# Arduino: receives move_dealer_forward
-ARDUINO_WS_URL = os.getenv("ARDUINO_WS_URL", "ws://192.168.1.245:8888").strip()
+TABLET_WS_URL  = os.getenv("TABLET_WS_URL",  "ws://192.168.1.246:8765").strip()  # cards_detected
+ARDUINO_WS_URL = os.getenv("ARDUINO_WS_URL", "ws://192.168.1.245:8888").strip()  # move_dealer_forward
 
 # burst/timeout knobs for Arduino reset command
 WS_BURST_SENDS      = int(os.getenv("WS_BURST_SENDS", "1"))
@@ -71,13 +72,20 @@ WS_RETRY_DELAY_MS   = int(os.getenv("WS_RETRY_DELAY_MS", "150"))
 WS_AWAIT_CONNECT_S  = float(os.getenv("WS_AWAIT_CONNECT_SEC", "1.5"))
 RESET_DEBOUNCE_SEC  = float(os.getenv("RESET_DEBOUNCE_SEC", "1.2"))
 
-# Two persistent sockets
+# Two persistent sockets + startup summary
 ws_tablet  = WSManager(url=TABLET_WS_URL)
 ws_arduino = WSManager(url=ARDUINO_WS_URL)
-
 ws_tablet.start()
 ws_arduino.start()
 atexit.register(lambda: (ws_tablet.stop(), ws_arduino.stop()))
+
+def _startup_summary():
+    t_ok = ws_tablet.wait_connected(2.0)
+    a_ok = ws_arduino.wait_connected(2.0)
+    print("[WS] tablet:", TABLET_WS_URL, "connected" if t_ok else "pending")
+    print("[WS] arduino:", ARDUINO_WS_URL, "connected" if a_ok else "pending")
+    print("[CFG] CAMERA_INDEX=", CAMERA_INDEX, " ROI=", ROI, " SLEEP_SEC=", SLEEP_SEC)
+    print("[CFG] FACEUP_WHITE_MIN=", FACEUP_WHITE_MIN, " RIM_EDGE_MAX=", RIM_EDGE_MAX, " CENTER_EDGE_MAX=", CENTER_EDGE_MAX)
 
 # -------------- helpers --------------
 def _roi(frame, r):
@@ -266,6 +274,7 @@ def main():
     if not cap.isOpened():
         print("[ERROR] camera not found"); return
 
+    _startup_summary()
     print("[INFO] Rim-only + dual-WS running (tablet: cards, arduino: reset).")
 
     # streak state
