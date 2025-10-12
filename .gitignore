@@ -8,6 +8,10 @@ __pycache__/
 
 # local data / outputs
 frames/
+debug/
+
+apikey_env
+.*.swp
 
 # secrets and env
 lastWorking/env
