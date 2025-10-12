@@ -149,7 +149,7 @@ def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, 
     GREEN  = "\033[1;32m"; RED = "\033[1;31m"; YELLOW="\033[1;33m"
     CYAN   = "\033[36m"; GRAY  = "\033[90m"
 
-    print(f"{BOLD}{CYAN}=== WED NIGHT POKER — CARD DETECT ==={RESET}")
+    print(f"{BOLD}{CYAN}=== WED NIGHT POKER — CARD DETECTOR ==={RESET}")
     t_ok = ws_tablet.is_connected; a_ok = ws_arduino.is_connected
     t_color = GREEN if t_ok else RED; a_color = GREEN if a_ok else RED
     print(f"{BOLD}Tablet : {t_color}{TABLET_WS_URL}{RESET}   [{t_color}{'UP' if t_ok else 'DOWN'}{RESET}]")
