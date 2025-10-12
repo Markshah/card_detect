@@ -8,6 +8,34 @@ from dotenv import load_dotenv
 if os.path.exists("env"): load_dotenv("env")
 def _b(k, d="0"): return os.getenv(k, d).strip().lower() in ("1","true","yes")
 
+# --------- simple "-KEY value" CLI parser ---------
+def parse_dash_args(argv):
+    """
+    Parses args like:  -CAMERA_INDEX 1 -SAVE_IMAGES 1 -ROI "100,100,800,600"
+    Returns a dict:    {'CAMERA_INDEX':'1', 'SAVE_IMAGES':'1', 'ROI':'100,100,800,600'}
+    """
+    args = {}
+    key = None
+    for token in argv:
+        if token.startswith('-') and not token.startswith('--'):
+            key = token.lstrip('-')
+            args[key] = None
+        else:
+            if key:
+                args[key] = token
+                key = None
+    return args
+
+# Example usage:
+_cli = parse_dash_args(sys.argv[1:])
+if _cli:
+    print("[CLI overrides detected]", _cli)
+
+# You can then apply overrides to env-style vars:
+for k, v in _cli.items():
+    os.environ[k] = v
+
+
 def _get_csv_ints(name, default="0,0,0,0"):
     raw = os.getenv(name, default)
     raw = raw.split("#", 1)[0].strip().strip('"').strip("'")
@@ -20,7 +48,7 @@ DASH_ROWS  = int(os.getenv("DASH_ROWS", "6"))
 # ---- camera / I/O ----
 CAMERA_INDEX = int(os.getenv("CAMERA_INDEX", "0"))
 ROI          = _get_csv_ints("ROI", "0,0,0,0")      # x,y,w,h; 0s = full frame
-SLEEP_SEC    = float(os.getenv("FIXED_LOOP_INTERVAL_SECONDS", "1.0"))
+SLEEP_SEC    = float(os.getenv("SLEEP_SEC", "1.0"))
 SAVE_DIR     = os.getenv("SAVE_FRAME_DIR", "./frames")
 DEBUG_DIR    = os.getenv("DEBUG_DUMP_DIR", "./debug")
 DRAW_STATS   = _b("DRAW_LABEL_STATS","1")

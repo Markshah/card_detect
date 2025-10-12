@@ -1,6 +1,6 @@
 # --- Camera & Loop ---
 CAMERA_INDEX=0
-FIXED_LOOP_INTERVAL_SECONDS=1.0
+SLEEP_SEC=1.0
 ROI="0,0,0,0"
 
 # --- Rim Classifier thresholds ---
@@ -41,8 +41,8 @@ SAVE_GRAYSCALE=0          # save gray with detection overlays
 SAVE_MASKS=0              # save norm/otsu/edges per frame
 DEBUG_EDGE_LOW=30
 DEBUG_EDGE_HIGH=90
-SAVE_RING_DEBUG=1         # force saving ring panels for each detected card
-LOG_REJECTIONS=1          # print reject reasons (area/aspect/px/etc.)
+SAVE_RING_DEBUG=0         # force saving ring panels for each detected card
+LOG_REJECTIONS=0          # print reject reasons (area/aspect/px/etc.)
 DRAW_LABEL_STATS=1
 DASH_ROWS=8
 QUIET_LOGS=1
