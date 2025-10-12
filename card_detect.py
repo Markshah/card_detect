@@ -3,6 +3,8 @@
 import os, sys, cv2, time, json, atexit, numpy as np, logging
 from collections import deque
 from dotenv import load_dotenv
+from pyfiglet import Figlet
+
 
 # ---------------- env ----------------
 if os.path.exists("env"): load_dotenv("env")
@@ -142,6 +144,8 @@ def log_event(s: str):
     ts = time.strftime("%H:%M:%S")
     events.appendleft(f"{ts}  {s}")
 
+from pyfiglet import Figlet
+
 def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up):
     import sys
     sys.stdout.write("\033[2J\033[H")  # clear + home
@@ -149,20 +153,27 @@ def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, 
     GREEN  = "\033[1;32m"; RED = "\033[1;31m"; YELLOW="\033[1;33m"
     CYAN   = "\033[36m"; GRAY  = "\033[90m"
 
+    # --- Large header
     print(f"{BOLD}{CYAN}=== WED NIGHT POKER — CARD DETECTOR ==={RESET}")
     t_ok = ws_tablet.is_connected; a_ok = ws_arduino.is_connected
     t_color = GREEN if t_ok else RED; a_color = GREEN if a_ok else RED
     print(f"{BOLD}Tablet : {t_color}{TABLET_WS_URL}{RESET}   [{t_color}{'UP' if t_ok else 'DOWN'}{RESET}]")
     print(f"{BOLD}Arduino: {a_color}{ARDUINO_WS_URL}{RESET}   [{a_color}{'UP' if a_ok else 'DOWN'}{RESET}]")
-#    print(f" {GRAY}[CFG]{RESET} CAMERA={CAMERA_INDEX} ROI={ROI} LOOP={SLEEP_SEC:.2f}s GRAY_ONLY={USE_GRAYSCALE_ONLY}")
 
-    state_txt = f"{GREEN}ARMED{RESET}" if armed else (f"{YELLOW}RESET{RESET}" if zero_up_streak>=ZERO_UP_CONSEC_N else f"{YELLOW}IDLE{RESET}")
+    # --- Big "Up" display
+    f = Figlet(font="big")  # try fonts: 'big', 'slant', 'banner3-D', etc.
+    big_up = f.renderText(str(face_up_now)).rstrip()
+    print(f"{GREEN}{big_up}{RESET}")
+    print(f"{BOLD}{YELLOW}CARDS UP{RESET}")
+
+    # --- State line
+    state_txt = f"{GREEN}ARMED{RESET}" if armed else (
+        f"{YELLOW}RESET{RESET}" if zero_up_streak>=ZERO_UP_CONSEC_N else f"{YELLOW}IDLE{RESET}")
     down_now = max(0, cards_now - face_up_now)
-    #print(f"{BOLD}[LIVE]{RESET} Cards={YELLOW}{cards_now}{RESET} Up={GREEN}{face_up_now}{RESET} Down={RED}{down_now}{RESET}  "
-          #f"state={state_txt}  Arm_streak={arm_streak}/{ARM_CONSEC_N}  Zero_streak={zero_up_streak}/{ZERO_UP_CONSEC_N}  Peak_up={peak_up}")
-    print(f"{BOLD}[LIVE]{RESET} Cards={YELLOW}{cards_now}{RESET} Up={GREEN}{face_up_now}{RESET} Down={RED}{down_now}{RESET}  "
-          f"state={state_txt}  Arm_streak={arm_streak}/{ARM_CONSEC_N}  Zero_streak={zero_up_streak}/{ZERO_UP_CONSEC_N}")
+    print(f"{BOLD}[LIVE]{RESET} Cards={YELLOW}{cards_now}{RESET} Down={RED}{down_now}{RESET}  "
+          f"State={state_txt}  Arm={arm_streak}/{ARM_CONSEC_N}  Zero={zero_up_streak}/{ZERO_UP_CONSEC_N}")
 
+    # --- Events
     print(f"{GRAY}" + "-" * 72 + f"{RESET}")
     print("Recent events:")
     if events:
@@ -172,6 +183,7 @@ def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, 
     else:
         print("  (none)")
     sys.stdout.flush()
+
 
 def _startup_summary():
     t_ok = ws_tablet.wait_connected(2.0)
