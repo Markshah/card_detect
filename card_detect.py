@@ -154,12 +154,14 @@ def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, 
     t_color = GREEN if t_ok else RED; a_color = GREEN if a_ok else RED
     print(f"{BOLD}Tablet : {t_color}{TABLET_WS_URL}{RESET}   [{t_color}{'UP' if t_ok else 'DOWN'}{RESET}]")
     print(f"{BOLD}Arduino: {a_color}{ARDUINO_WS_URL}{RESET}   [{a_color}{'UP' if a_ok else 'DOWN'}{RESET}]")
-    print(f" {GRAY}[CFG]{RESET} CAMERA={CAMERA_INDEX} ROI={ROI} LOOP={SLEEP_SEC:.2f}s GRAY_ONLY={USE_GRAYSCALE_ONLY}")
+#    print(f" {GRAY}[CFG]{RESET} CAMERA={CAMERA_INDEX} ROI={ROI} LOOP={SLEEP_SEC:.2f}s GRAY_ONLY={USE_GRAYSCALE_ONLY}")
 
     state_txt = f"{GREEN}ARMED{RESET}" if armed else (f"{YELLOW}RESET{RESET}" if zero_up_streak>=ZERO_UP_CONSEC_N else f"{YELLOW}IDLE{RESET}")
     down_now = max(0, cards_now - face_up_now)
-    print(f" {BOLD}[LIVE]{RESET} cards={YELLOW}{cards_now}{RESET} up={GREEN}{face_up_now}{RESET} down={RED}{down_now}{RESET}  "
-          f"state={state_txt}  arm_streak={arm_streak}/{ARM_CONSEC_N}  zero_streak={zero_up_streak}/{ZERO_UP_CONSEC_N}  peak_up={peak_up}")
+    #print(f"{BOLD}[LIVE]{RESET} Cards={YELLOW}{cards_now}{RESET} Up={GREEN}{face_up_now}{RESET} Down={RED}{down_now}{RESET}  "
+          #f"state={state_txt}  Arm_streak={arm_streak}/{ARM_CONSEC_N}  Zero_streak={zero_up_streak}/{ZERO_UP_CONSEC_N}  Peak_up={peak_up}")
+    print(f"{BOLD}[LIVE]{RESET} Cards={YELLOW}{cards_now}{RESET} Up={GREEN}{face_up_now}{RESET} Down={RED}{down_now}{RESET}  "
+          f"state={state_txt}  Arm_streak={arm_streak}/{ARM_CONSEC_N}  Zero_streak={zero_up_streak}/{ZERO_UP_CONSEC_N}")
 
     print(f"{GRAY}" + "-" * 72 + f"{RESET}")
     print("Recent events:")
