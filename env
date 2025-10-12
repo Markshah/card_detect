@@ -12,6 +12,14 @@ RIM_OUTER_FRAC=0.08
 RIM_INNER_FRAC=0.30
 WHITE_CHROMA_MAX=12
 
+# --- WS startup & runtime behavior ---
+ENFORCE_STARTUP_GRACE=1
+STARTUP_GRACE_SEC=3600     # 60 minutes
+
+ENFORCE_BOTH_WS=1
+BOTH_WS_TIMEOUT_SEC=600    # 10 minutes after both have connected once
+
+
 # --- Candidate size/shape gates ---
 CARD_AABB_MIN_FRAC=0.0018
 CARD_AABB_MAX_FRAC=0.30

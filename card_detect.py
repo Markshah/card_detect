@@ -54,6 +54,14 @@ DEBUG_DIR    = os.getenv("DEBUG_DUMP_DIR", "./debug")
 DRAW_STATS   = _b("DRAW_LABEL_STATS","1")
 WARP_SIZE    = (int(os.getenv("WARP_W","400")), int(os.getenv("WARP_H","560")))
 
+ENFORCE_STARTUP_GRACE = int(os.getenv("ENFORCE_STARTUP_GRACE","1"))
+STARTUP_GRACE_S       = float(os.getenv("STARTUP_GRACE_SEC","1800"))
+
+ENFORCE_BOTH_WS       = int(os.getenv("ENFORCE_BOTH_WS","1"))
+BOTH_WS_TIMEOUT_S     = float(os.getenv("BOTH_WS_TIMEOUT_SEC","600"))
+
+
+
 SAVE_IMAGES     = int(os.getenv("SAVE_IMAGES", "0"))
 SAVE_WARPS      = int(os.getenv("SAVE_WARPS", "0"))
 SAVE_GRAYSCALE  = int(os.getenv("SAVE_GRAYSCALE", "0"))
@@ -380,6 +388,12 @@ def main():
     _startup_summary()
     log_event("loop starting")
 
+    # --- WS connection state ---
+    app_start_ts = time.time()
+    ws_watchdog_start = app_start_ts
+    both_connected_once = False
+
+
     armed = False
     arm_streak = 0
     zero_up_streak = 0
@@ -388,6 +402,40 @@ def main():
     while True:
         ts = time.strftime("%Y%m%d-%H%M%S")
         ok, frame = cap.read()
+
+        # ---------------- Both-WS connection policy ----------------
+        # We want:
+        #  (A) Startup grace: wait up to STARTUP_GRACE_S for BOTH sockets to be up at least once.
+        #  (B) After BOTH have been connected at least once, enforce a runtime watchdog:
+        #      exit if BOTH are not simultaneously UP for >= BOTH_WS_TIMEOUT_S.
+        now = time.time()
+        both_up = (ws_tablet.is_connected and ws_arduino.is_connected)
+
+        if not both_connected_once:
+            if both_up:
+                both_connected_once = True
+                ws_watchdog_start = now
+                log_event("Both WS connected — runtime watchdog ARMED")
+            else:
+                if ENFORCE_STARTUP_GRACE and (now - app_start_ts >= STARTUP_GRACE_S):
+                    log_event(f"EXIT: startup grace ({int(STARTUP_GRACE_S)}s) expired without both WS up")
+                    # One last dashboard so it’s obvious why we’re exiting
+                    render_dashboard(face_up_now=0, cards_now=0, armed=False,
+                                     arm_streak=0, zero_up_streak=0, peak_up=0)
+                    sys.exit(3)
+                # still in grace; keep looping
+        else:
+            # Runtime phase: watchdog
+            if both_up:
+                ws_watchdog_start = now  # reset timer whenever both are up
+            else:
+                if ENFORCE_BOTH_WS and (now - ws_watchdog_start >= BOTH_WS_TIMEOUT_S):
+                    log_event(f"EXIT: both WS not up simultaneously for "
+                              f"{int(now - ws_watchdog_start)}s (>= {int(BOTH_WS_TIMEOUT_S)}s)")
+                    render_dashboard(face_up_now=0, cards_now=0, armed=False,
+                                     arm_streak=0, zero_up_streak=0, peak_up=0)
+                    sys.exit(2)
+
         if not ok:
             time.sleep(SLEEP_SEC)
             render_dashboard(0, 0, armed, arm_streak, zero_up_streak, peak_up)
