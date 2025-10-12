@@ -10,7 +10,6 @@ __pycache__/
 frames/
 
 # secrets and env
-env
 lastWorking/env
 oldStuff/env
 oldStuff/bwLastWorking/env

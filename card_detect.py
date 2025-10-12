@@ -14,23 +14,28 @@ def _get_csv_ints(name, default="0,0,0,0"):
     parts = [p.strip() for p in raw.split(",")]
     return tuple(int(p or "0") for p in parts[:4]) if len(parts) >= 4 else (0,0,0,0)
 
-QUIET_LOGS = _b("QUIET_LOGS", "1")  # keeps dashboard static by muting noisy INFO logs
-DASH_ROWS  = int(os.getenv("DASH_ROWS", "6"))  # recent event lines to keep
+QUIET_LOGS = _b("QUIET_LOGS", "1")
+DASH_ROWS  = int(os.getenv("DASH_ROWS", "6"))
 
 # ---- camera / I/O ----
 CAMERA_INDEX = int(os.getenv("CAMERA_INDEX", "0"))
-ROI          = _get_csv_ints("ROI", "0,0,0,0")  # x,y,w,h; 0s = full frame
+ROI          = _get_csv_ints("ROI", "0,0,0,0")      # x,y,w,h; 0s = full frame
 SLEEP_SEC    = float(os.getenv("FIXED_LOOP_INTERVAL_SECONDS", "1.0"))
 SAVE_DIR     = os.getenv("SAVE_FRAME_DIR", "./frames")
 DEBUG_DIR    = os.getenv("DEBUG_DUMP_DIR", "./debug")
 DRAW_STATS   = _b("DRAW_LABEL_STATS","1")
 WARP_SIZE    = (int(os.getenv("WARP_W","400")), int(os.getenv("WARP_H","560")))
 
-SAVE_IMAGES = int(os.getenv("SAVE_IMAGES", "0"))   # 0=off, 1=on
-SAVE_WARPS  = int(os.getenv("SAVE_WARPS", "0"))    # 0=off, 1=on
-SAVE_GRAYSCALE = int(os.getenv("SAVE_GRAYSCALE", "0"))  # 0=off, 1=save grayscale frames
+SAVE_IMAGES     = int(os.getenv("SAVE_IMAGES", "0"))
+SAVE_WARPS      = int(os.getenv("SAVE_WARPS", "0"))
+SAVE_GRAYSCALE  = int(os.getenv("SAVE_GRAYSCALE", "0"))
+SAVE_MASKS      = int(os.getenv("SAVE_MASKS", "0"))
+DEBUG_EDGE_LOW  = int(os.getenv("DEBUG_EDGE_LOW","30"))
+DEBUG_EDGE_HIGH = int(os.getenv("DEBUG_EDGE_HIGH","90"))
+SAVE_RING_DEBUG = int(os.getenv("SAVE_RING_DEBUG","0"))
+LOG_REJECTIONS  = int(os.getenv("LOG_REJECTIONS","0"))
 
-# ---- rim classifier knobs (env-tunable) ----
+# ---- rim classifier knobs ----
 RIM_OUTER_FRAC   = float(os.getenv("RIM_OUTER_FRAC", "0.08"))
 RIM_INNER_FRAC   = float(os.getenv("RIM_INNER_FRAC", "0.30"))
 CHROMA_MAX       = float(os.getenv("WHITE_CHROMA_MAX", "12"))
@@ -48,19 +53,26 @@ SOLIDITY_MIN = float(os.getenv("SOLIDITY_MIN","0.88"))
 FILL_OBB_MIN = float(os.getenv("FILL_OBB_MIN","0.80"))
 ANGLE_TOL_DEG= float(os.getenv("ANGLE_TOL_DEG","16"))
 
-# absolute pixel gates (stable in a fixed rig)
-CARD_SHORT_MIN_PX = int(os.getenv("CARD_SHORT_MIN_PX", "130"))
-CARD_SHORT_MAX_PX = int(os.getenv("CARD_SHORT_MAX_PX", "260"))
-CARD_LONG_MIN_PX  = int(os.getenv("CARD_LONG_MIN_PX",  "180"))
-CARD_LONG_MAX_PX  = int(os.getenv("CARD_LONG_MAX_PX",  "380"))
+# absolute pixel gates (now optional/adaptive)
+USE_ABS_PX_GUARDS = int(os.getenv("USE_ABS_PX_GUARDS","0")) # 0=off, 1=fixed, 2=adaptive
+CARD_SHORT_MIN_PX = int(os.getenv("CARD_SHORT_MIN_PX", "100"))
+CARD_SHORT_MAX_PX = int(os.getenv("CARD_SHORT_MAX_PX", "420"))
+CARD_LONG_MIN_PX  = int(os.getenv("CARD_LONG_MIN_PX",  "160"))
+CARD_LONG_MAX_PX  = int(os.getenv("CARD_LONG_MAX_PX",  "720"))
+
+# adaptive buffers
+_ADAPT_SHORT = deque(maxlen=40)
+_ADAPT_LONG  = deque(maxlen=40)
+ADAPT_SLOP_S = 60
+ADAPT_SLOP_L = 90
 
 # ---- arming / reset policy ----
 ARM_CONSEC_N       = int(os.getenv("ARM_CONSEC_N", "3"))
 ARM_FACEUP_MIN     = int(os.getenv("ARM_FACEUP_MIN", "2"))
-ZERO_UP_CONSEC_N   = int(os.getenv("ZERO_UP_CONSEC_N", "3"))  # reset only after N consecutive zero-up loops
+ZERO_UP_CONSEC_N   = int(os.getenv("ZERO_UP_CONSEC_N", "3"))
 
 # send policy
-RESEND_EVERY       = int(os.getenv("RESEND_EVERY", "5"))  # periodic same-value push
+RESEND_EVERY       = int(os.getenv("RESEND_EVERY", "5"))
 USE_GRAYSCALE_ONLY = int(os.getenv("USE_GRAYSCALE_ONLY","1"))
 
 # ---- websocket (DUAL DESTINATIONS) ----
@@ -68,7 +80,6 @@ from ws_mgr import WSManager
 TABLET_WS_URL  = os.getenv("TABLET_WS_URL",  "ws://192.168.1.246:8765").strip()  # cards_detected
 ARDUINO_WS_URL = os.getenv("ARDUINO_WS_URL", "ws://192.168.1.245:8888").strip()  # move_dealer_forward
 
-# burst/timeout knobs for Arduino reset command
 WS_BURST_SENDS      = int(os.getenv("WS_BURST_SENDS", "1"))
 WS_BURST_SPACING_MS = int(os.getenv("WS_BURST_SPACING_MS", "40"))
 WS_SEND_RETRIES     = int(os.getenv("WS_SEND_RETRIES", "4"))
@@ -91,101 +102,44 @@ atexit.register(lambda: (ws_tablet.stop(), ws_arduino.stop()))
 
 # ---------------- dashboard helpers ----------------
 events = deque(maxlen=DASH_ROWS)
-
 def log_event(s: str):
     ts = time.strftime("%H:%M:%S")
     events.appendleft(f"{ts}  {s}")
 
-
 def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up):
     import sys
     sys.stdout.write("\033[2J\033[H")  # clear + home
+    RESET  = "\033[0m"; BOLD   = "\033[1m"
+    GREEN  = "\033[1;32m"; RED = "\033[1;31m"; YELLOW="\033[1;33m"
+    CYAN   = "\033[36m"; GRAY  = "\033[90m"
 
-    # ANSI colors
-    RESET  = "\033[0m"
-    BOLD   = "\033[1m"
-    BLUE   = "\033[1;34m"
-    GREEN  = "\033[1;32m"
-    RED    = "\033[1;31m"
-    YELLOW = "\033[1;33m"
-    CYAN   = "\033[36m"
-    MAG    = "\033[35m"
-    GRAY   = "\033[90m"
-
-    # Header
     print(f"{BOLD}{CYAN}=== WED NIGHT POKER — CARD DETECT ==={RESET}")
-
-    # Live WS status
-    t_ok = ws_tablet.is_connected
-    a_ok = ws_arduino.is_connected
-    t_color = GREEN if t_ok else RED
-    a_color = GREEN if a_ok else RED
+    t_ok = ws_tablet.is_connected; a_ok = ws_arduino.is_connected
+    t_color = GREEN if t_ok else RED; a_color = GREEN if a_ok else RED
     print(f"{BOLD}Tablet : {t_color}{TABLET_WS_URL}{RESET}   [{t_color}{'UP' if t_ok else 'DOWN'}{RESET}]")
     print(f"{BOLD}Arduino: {a_color}{ARDUINO_WS_URL}{RESET}   [{a_color}{'UP' if a_ok else 'DOWN'}{RESET}]")
-
-    # Config snapshot
     print(f" {GRAY}[CFG]{RESET} CAMERA={CAMERA_INDEX} ROI={ROI} LOOP={SLEEP_SEC:.2f}s GRAY_ONLY={USE_GRAYSCALE_ONLY}")
 
-    # Live state
-    if armed:
-        state_txt = f"{GREEN}ARMED{RESET}"
-    elif zero_up_streak >= ZERO_UP_CONSEC_N:
-        state_txt = f"{YELLOW}RESET{RESET}"
-    else:
-        state_txt = f"{YELLOW}IDLE{RESET}"
-
+    state_txt = f"{GREEN}ARMED{RESET}" if armed else (f"{YELLOW}RESET{RESET}" if zero_up_streak>=ZERO_UP_CONSEC_N else f"{YELLOW}IDLE{RESET}")
     down_now = max(0, cards_now - face_up_now)
-    print(
-        f" {BOLD}[LIVE]{RESET} cards={YELLOW}{cards_now}{RESET} "
-        f"up={GREEN}{face_up_now}{RESET} down={RED}{down_now}{RESET}  "
-        f"state={state_txt}  "
-        f"arm_streak={arm_streak}/{ARM_CONSEC_N}  "
-        f"zero_streak={zero_up_streak}/{ZERO_UP_CONSEC_N}  "
-        f"peak_up={peak_up}"
-    )
+    print(f" {BOLD}[LIVE]{RESET} cards={YELLOW}{cards_now}{RESET} up={GREEN}{face_up_now}{RESET} down={RED}{down_now}{RESET}  "
+          f"state={state_txt}  arm_streak={arm_streak}/{ARM_CONSEC_N}  zero_streak={zero_up_streak}/{ZERO_UP_CONSEC_N}  peak_up={peak_up}")
 
-    # Divider + events
     print(f"{GRAY}" + "-" * 72 + f"{RESET}")
     print("Recent events:")
     if events:
         for line in list(events):
-            if "ARMED" in line:
-                color = GREEN
-            elif "RESET" in line:
-                color = YELLOW
-            elif "failed" in line or "error" in line.lower():
-                color = RED
-            else:
-                color = GRAY
+            color = GREEN if "ARMED" in line else (YELLOW if "RESET" in line else (RED if "fail" in line.lower() else GRAY))
             print("  " + color + line + RESET)
     else:
         print("  (none)")
-
     sys.stdout.flush()
 
-
 def _startup_summary():
-    # give each connection a moment to come up
     t_ok = ws_tablet.wait_connected(2.0)
     a_ok = ws_arduino.wait_connected(2.0)
     log_event(f"Tablet {'connected' if t_ok else 'pending'}")
     log_event(f"Arduino {'connected' if a_ok else 'pending'}")
-
-def print_ws_status():
-    """Display WebSocket connection statuses in color."""
-    reset = "\033[0m"
-    green = "\033[1;32m"
-    red   = "\033[1;31m"
-    bold  = "\033[1m"
-
-    t_ok = ws_tablet.is_connected
-    a_ok = ws_arduino.is_connected
-
-    t_color = green if t_ok else red
-    a_color = green if a_ok else red
-
-    print(f"{bold}[WS]{reset} tablet : {t_color}{TABLET_WS_URL}{reset}   [{t_color}{'UP' if t_ok else 'DOWN'}{reset}]")
-    print(f"{bold}[WS]{reset} arduino: {a_color}{ARDUINO_WS_URL}{reset}   [{a_color}{'UP' if a_ok else 'DOWN'}{reset}]")
 
 # -------------- vision helpers --------------
 def _roi(frame, r):
@@ -227,36 +181,61 @@ def _warp_from_contour(img_bgr, cnt, out_size=WARP_SIZE):
     warp = cv2.warpPerspective(img_bgr, M, (ow, oh))
     return warp, box, (W,H)
 
+def _rej(msg):
+    if LOG_REJECTIONS: print(msg)
+
 def _card_candidates(mask, frame_w, frame_h):
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        if area < 3000: continue
+        if area < 3000:
+            _rej(f"[rej] area<3000 area={area:.0f}")
+            continue
         x,y,w,h = cv2.boundingRect(cnt)
         aabb_frac = (w*h)/float(frame_w*frame_h + 1e-6)
-        if not (CARD_AABB_MIN_FRAC <= aabb_frac <= CARD_AABB_MAX_FRAC): continue
-        if min(w,h) < CARD_SHORTSIDE_MIN: continue
+        if not (CARD_AABB_MIN_FRAC <= aabb_frac <= CARD_AABB_MAX_FRAC):
+            _rej(f"[rej] aabb_frac={aabb_frac:.5f} wh=({w},{h})")
+            continue
+        if min(w,h) < CARD_SHORTSIDE_MIN:
+            _rej(f"[rej] shortside_min={min(w,h)} < {CARD_SHORTSIDE_MIN}")
+            continue
 
         hull = cv2.convexHull(cnt)
         solidity = area / (cv2.contourArea(hull)+1e-6)
         (cx,cy),(mw,mh),ang = cv2.minAreaRect(cnt)
         asp = max(mw,mh)/max(1.0,min(mw,mh))
         obb_fill = area / (mw*mh + 1e-6)
-        if not (ASPECT_MIN <= asp <= ASPECT_MAX): continue
-        if solidity < SOLIDITY_MIN or obb_fill < FILL_OBB_MIN: continue
+        if not (ASPECT_MIN <= asp <= ASPECT_MAX):
+            _rej(f"[rej] aspect={asp:.3f} not in [{ASPECT_MIN},{ASPECT_MAX}]")
+            continue
+        if solidity < SOLIDITY_MIN or obb_fill < FILL_OBB_MIN:
+            _rej(f"[rej] solidity/fill={solidity:.3f}/{obb_fill:.3f}")
+            continue
 
         quad = cv2.boxPoints(cv2.minAreaRect(cnt))
-        if not _right_angle_quad(quad): continue
-
-        # absolute pixel size guard
-        short_px = min(mw, mh); long_px = max(mw, mh)
-        if not (CARD_SHORT_MIN_PX <= short_px <= CARD_SHORT_MAX_PX and
-                CARD_LONG_MIN_PX  <= long_px  <= CARD_LONG_MAX_PX):
+        if not _right_angle_quad(quad):
+            _rej("[rej] angles off 90±tol")
             continue
+
+        # ----- absolute pixel guard: optional/adaptive -----
+        short_px = min(mw, mh); long_px = max(mw, mh)
+        _ADAPT_SHORT.append(short_px); _ADAPT_LONG.append(long_px)
+
+        if USE_ABS_PX_GUARDS == 1:
+            if not (CARD_SHORT_MIN_PX <= short_px <= CARD_SHORT_MAX_PX and
+                    CARD_LONG_MIN_PX  <= long_px  <= CARD_LONG_MAX_PX):
+                _rej(f"[rej] abs_px short={short_px:.0f} long={long_px:.0f}")
+                continue
+        elif USE_ABS_PX_GUARDS == 2 and len(_ADAPT_SHORT) >= 5:
+            ms, ml = np.median(_ADAPT_SHORT), np.median(_ADAPT_LONG)
+            if not (ms-ADAPT_SLOP_S <= short_px <= ms+ADAPT_SLOP_S and
+                    ml-ADAPT_SLOP_L <= long_px  <= ml+ADAPT_SLOP_L):
+                _rej(f"[rej] abs_px_adapt short={short_px:.0f}/{ms:.0f} long={long_px:.0f}/{ml:.0f}")
+                continue
 
         yield cnt
 
-# -------------- ring-only classifier (with optional debug panel) --------------
+# -------------- ring-only classifier --------------
 def classify_by_white_rim(warp_bgr, make_panel=True):
     lab = cv2.cvtColor(warp_bgr, cv2.COLOR_BGR2LAB)
     L   = lab[...,0].astype(np.float32)
@@ -281,16 +260,11 @@ def classify_by_white_rim(warp_bgr, make_panel=True):
         return "face_down", {"rule":"no_ring"}, None
 
     L_thr = np.percentile(L_ring, REL_WHITE_PCT * 100.0)
-
-    if USE_GRAYSCALE_ONLY:
-        white_mask = (L >= L_thr) & ring
-    else:
-        white_mask = (L >= L_thr) & (C <= CHROMA_MAX) & ring
-
+    white_mask = (L >= L_thr) & ring if USE_GRAYSCALE_ONLY else ((L >= L_thr) & (C <= CHROMA_MAX) & ring)
     white_frac = float(white_mask.mean())
 
     normL = _normalize_L(L.astype(np.uint8))
-    edges = cv2.Canny(normL, 30, 90)
+    edges = cv2.Canny(normL, DEBUG_EDGE_LOW, DEBUG_EDGE_HIGH)
     rim_edge = float((edges[ring] > 0).mean())
 
     csz = max(10, min(w, h)//5)
@@ -305,13 +279,13 @@ def classify_by_white_rim(warp_bgr, make_panel=True):
     }
 
     label = "face_up" if (white_frac >= FACEUP_WHITE_MIN and rim_edge <= RIM_EDGE_MAX and center_edge <= CENTER_EDGE_MAX) \
-            else ("face_down" if (white_frac <= 0.20 or rim_edge >= RIM_EDGE_MAX+0.02) else "face_down")
+            else "face_down"
 
     panel = None
-    if SAVE_WARPS and make_panel:
+    if (SAVE_WARPS or SAVE_RING_DEBUG) and make_panel:
         overlay = warp_bgr.copy()
         ring_vis = np.zeros_like(overlay)
-        ring_vis[white_mask] = (0,255,0)
+        ring_vis[white_mask.astype(bool)] = (0,255,0)
         dbg1 = cv2.addWeighted(overlay, 0.85, ring_vis, 0.45, 0)
         white_img = (white_mask.astype(np.uint8)*255)
         edges_ring = (edges * ring.astype(np.uint8))
@@ -327,7 +301,6 @@ _same_streak = 0
 _last_reset_ts = 0.0
 
 def send_cards_change_or_every(count: int):
-    """Send {'command':'cards_detected'} on change or every RESEND_EVERY identical reads (to TABLET)."""
     global _last_obs, _same_streak
     count = int(count)
     if _last_obs is None or count != _last_obs:
@@ -344,7 +317,6 @@ def send_cards_change_or_every(count: int):
     return False
 
 def send_reset_reliably():
-    """Debounced, retried, bursty reset → move_dealer_forward (to ARDUINO)."""
     global _last_reset_ts
     now = time.time()
     if now - _last_reset_ts < RESET_DEBOUNCE_SEC:
@@ -378,10 +350,8 @@ def main():
         return
 
     _startup_summary()
-
     log_event("loop starting")
 
-    # streak state
     armed = False
     arm_streak = 0
     zero_up_streak = 0
@@ -401,6 +371,12 @@ def main():
         norm = _normalize_L(gray)
         _, th = cv2.threshold(norm, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
+        if SAVE_MASKS:
+            edges_full = cv2.Canny(norm, DEBUG_EDGE_LOW, DEBUG_EDGE_HIGH)
+            cv2.imwrite(os.path.join(SAVE_DIR, f"norm_{ts}.png"), norm)
+            cv2.imwrite(os.path.join(SAVE_DIR, f"th_{ts}.png"), th)
+            cv2.imwrite(os.path.join(SAVE_DIR, f"edges_{ts}.png"), edges_full)
+
         cards = []
         for idx, cnt in enumerate(_card_candidates(th, proc.shape[1], proc.shape[0])):
             warp, box, (mw, mh) = _warp_from_contour(proc, cnt)
@@ -413,10 +389,7 @@ def main():
 
         # --- arming/reset state machine ---
         if not armed:
-            if face_up_now >= ARM_FACEUP_MIN:
-                arm_streak += 1
-            else:
-                arm_streak = 0
+            arm_streak = arm_streak + 1 if face_up_now >= ARM_FACEUP_MIN else 0
             if arm_streak >= ARM_CONSEC_N:
                 armed = True
                 send_cards_change_or_every(face_up_now)
@@ -424,11 +397,7 @@ def main():
                 peak_up = face_up_now
                 log_event(f"STATE -> ARMED (need {ARM_FACEUP_MIN}+ for {ARM_CONSEC_N})")
         else:
-            if face_up_now == 0:
-                zero_up_streak += 1
-            else:
-                zero_up_streak = 0
-
+            zero_up_streak = zero_up_streak + 1 if face_up_now == 0 else 0
             if zero_up_streak >= ZERO_UP_CONSEC_N:
                 log_event(f"STATE -> RESET (zero-up for {ZERO_UP_CONSEC_N}, peak={peak_up})")
                 send_cards_change_or_every(0)
@@ -440,7 +409,7 @@ def main():
             else:
                 send_cards_change_or_every(face_up_now)
 
-        # annotate & optional saves
+        # annotate & optional saves on color frame
         for idx, (label, info, box, panel) in enumerate(cards):
             color = (0,255,0) if label=="face_up" else (0,0,255)
             box = (box + np.array([[offx,offy]], dtype=np.float32)).astype(int)
@@ -450,16 +419,28 @@ def main():
                 s = f"crm={info.get('crm',0):.3f} rim_e={info.get('rim_e',0):.3f} c={info.get('center_ed',0):.3f}"
                 cv2.putText(frame, s, (box[0][0], box[0][1]+18),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-            if SAVE_WARPS and panel is not None:
+            if (SAVE_WARPS or SAVE_RING_DEBUG) and panel is not None:
                 fn = os.path.join(DEBUG_DIR, f"{ts}_card{idx}_{label}_crm{info['crm']}_re{info['rim_e']}.png")
                 cv2.imwrite(fn, panel)
 
+        # save full-color frame
         if SAVE_IMAGES:
             cv2.imwrite(os.path.join(SAVE_DIR, f"frame_{ts}.jpg"), frame)
 
+        # save grayscale with overlays for clarity
         if SAVE_GRAYSCALE:
-            gray_path = os.path.join(SAVE_DIR, f"gray_{ts}.jpg")
-            cv2.imwrite(gray_path, norm)
+            gray_vis = cv2.cvtColor(norm, cv2.COLOR_GRAY2BGR)
+            for idx, (label, info, box, panel) in enumerate(cards):
+                color = (0,255,0) if label=="face_up" else (0,0,255)
+                box = (box + np.array([[offx,offy]], dtype=np.float32)).astype(int)
+                cv2.polylines(gray_vis, [box], True, color, 2)
+                cv2.putText(gray_vis, f"{idx}:{label}", tuple(box[0]),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                if DRAW_STATS:
+                    s = f"crm={info.get('crm',0):.3f} rim_e={info.get('rim_e',0):.3f} c={info.get('center_ed',0):.3f}"
+                    cv2.putText(gray_vis, s, (box[0][0], box[0][1]+18),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            cv2.imwrite(os.path.join(SAVE_DIR, f"gray_{ts}.jpg"), gray_vis)
 
         # draw dashboard last
         render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up)
