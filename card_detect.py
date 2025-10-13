@@ -5,7 +5,6 @@ from collections import deque
 from dotenv import load_dotenv
 from pyfiglet import Figlet
 
-
 # ---------------- env ----------------
 if os.path.exists("env"): load_dotenv("env")
 def _b(k, d="0"): return os.getenv(k, d).strip().lower() in ("1","true","yes")
@@ -28,15 +27,11 @@ def parse_dash_args(argv):
                 key = None
     return args
 
-# Example usage:
 _cli = parse_dash_args(sys.argv[1:])
 if _cli:
     print("[CLI overrides detected]", _cli)
-
-# You can then apply overrides to env-style vars:
 for k, v in _cli.items():
     os.environ[k] = v
-
 
 def _get_csv_ints(name, default="0,0,0,0"):
     raw = os.getenv(name, default)
@@ -45,7 +40,9 @@ def _get_csv_ints(name, default="0,0,0,0"):
     return tuple(int(p or "0") for p in parts[:4]) if len(parts) >= 4 else (0,0,0,0)
 
 QUIET_LOGS = _b("QUIET_LOGS", "1")
-DASH_ROWS  = int(os.getenv("DASH_ROWS", "6"))
+
+# number of recent events
+DASH_ROWS  = int(os.getenv("DASH_ROWS", "6")) 
 
 # ---- camera / I/O ----
 CAMERA_INDEX = int(os.getenv("CAMERA_INDEX", "0"))
@@ -56,13 +53,16 @@ DEBUG_DIR    = os.getenv("DEBUG_DUMP_DIR", "./debug")
 DRAW_STATS   = _b("DRAW_LABEL_STATS","1")
 WARP_SIZE    = (int(os.getenv("WARP_W","400")), int(os.getenv("WARP_H","560")))
 
+# ---- SIM MODE (new) ----
+SIM              = int(os.getenv("SIM","0"))   # enable with -SIM 1
+SIM_INTERVAL_SEC = float(os.getenv("SIM_INTERVAL_SEC","12"))
+SIM_VALUES       = os.getenv("SIM_VALUES","3,0")  # sequence to alternate through (default 3,0)
+
+# ---- WS grace/watchdog ----
 ENFORCE_STARTUP_GRACE = int(os.getenv("ENFORCE_STARTUP_GRACE","1"))
 STARTUP_GRACE_S       = float(os.getenv("STARTUP_GRACE_SEC","1800"))
-
 ENFORCE_BOTH_WS       = int(os.getenv("ENFORCE_BOTH_WS","1"))
 BOTH_WS_TIMEOUT_S     = float(os.getenv("BOTH_WS_TIMEOUT_SEC","600"))
-
-
 
 SAVE_IMAGES     = int(os.getenv("SAVE_IMAGES", "0"))
 SAVE_WARPS      = int(os.getenv("SAVE_WARPS", "0"))
@@ -91,14 +91,14 @@ SOLIDITY_MIN = float(os.getenv("SOLIDITY_MIN","0.88"))
 FILL_OBB_MIN = float(os.getenv("FILL_OBB_MIN","0.80"))
 ANGLE_TOL_DEG= float(os.getenv("ANGLE_TOL_DEG","16"))
 
-# absolute pixel gates (now optional/adaptive)
+# absolute pixel guards (optional/adaptive)
 USE_ABS_PX_GUARDS = int(os.getenv("USE_ABS_PX_GUARDS","0")) # 0=off, 1=fixed, 2=adaptive
 CARD_SHORT_MIN_PX = int(os.getenv("CARD_SHORT_MIN_PX", "100"))
 CARD_SHORT_MAX_PX = int(os.getenv("CARD_SHORT_MAX_PX", "420"))
 CARD_LONG_MIN_PX  = int(os.getenv("CARD_LONG_MIN_PX",  "160"))
 CARD_LONG_MAX_PX  = int(os.getenv("CARD_LONG_MAX_PX",  "720"))
 
-# adaptive buffers
+from collections import deque
 _ADAPT_SHORT = deque(maxlen=40)
 _ADAPT_LONG  = deque(maxlen=40)
 ADAPT_SLOP_S = 60
@@ -144,13 +144,7 @@ def log_event(s: str):
     ts = time.strftime("%H:%M:%S")
     events.appendleft(f"{ts}  {s}")
 
-from pyfiglet import Figlet
 
-from pyfiglet import Figlet
-
-from pyfiglet import Figlet
-
-from pyfiglet import Figlet
 
 def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up):
     import sys
@@ -209,11 +203,38 @@ def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, 
 
 
 
+
 def _startup_summary():
     t_ok = ws_tablet.wait_connected(2.0)
     a_ok = ws_arduino.wait_connected(2.0)
     log_event(f"Tablet {'connected' if t_ok else 'pending'}")
     log_event(f"Arduino {'connected' if a_ok else 'pending'}")
+
+# ---------------- SIM MODE LOOP (new) ----------------
+def run_simulator():
+    """Alternate sending counts to the TABLET: e.g., 3 -> 0 -> 3 -> 0 every N seconds."""
+    # parse sequence (default "3,0")
+    try:
+        seq = [int(s.strip()) for s in SIM_VALUES.split(",") if s.strip() != ""]
+    except ValueError:
+        seq = [3, 0]
+    if not seq:
+        seq = [3, 0]
+
+    log_event(f"SIM MODE: sequence={seq} interval={SIM_INTERVAL_SEC:.1f}s  (to Tablet only)")
+    idx = 0
+    arm_streak = 0
+    zero_up_streak = 0
+    peak_up = 0
+    while True:
+        val = int(seq[idx % len(seq)])
+        peak_up = max(peak_up, val)
+        ws_tablet.send_cards_detected(val)  # send directly each tick
+        log_event(f"[SIM] cards_detected -> {val}")
+        render_dashboard(face_up_now=val, cards_now=val, armed=False,
+                         arm_streak=arm_streak, zero_up_streak=zero_up_streak, peak_up=peak_up)
+        time.sleep(SIM_INTERVAL_SEC)
+        idx += 1
 
 # -------------- vision helpers --------------
 def _roi(frame, r):
@@ -291,7 +312,6 @@ def _card_candidates(mask, frame_w, frame_h):
             _rej("[rej] angles off 90±tol")
             continue
 
-        # ----- absolute pixel guard: optional/adaptive -----
         short_px = min(mw, mh); long_px = max(mw, mh)
         _ADAPT_SHORT.append(short_px); _ADAPT_LONG.append(long_px)
 
@@ -345,15 +365,10 @@ def classify_by_white_rim(warp_bgr, make_panel=True):
     cx0 = w//2 - csz//2; cy0 = h//2 - csz//2
     center_edge = float((edges[cy0:cy0+csz, cx0:cx0+csz] > 0).mean())
 
-    stats = {
-        "crm": round(white_frac,3),
-        "rim_e": round(rim_edge,3),
-        "center_ed": round(center_edge,3),
-        "L_thr": float(L_thr)
-    }
+    stats = {"crm": round(white_frac,3), "rim_e": round(rim_edge,3),
+             "center_ed": round(center_edge,3), "L_thr": float(L_thr)}
 
-    label = "face_up" if (white_frac >= FACEUP_WHITE_MIN and rim_edge <= RIM_EDGE_MAX and center_edge <= CENTER_EDGE_MAX) \
-            else "face_down"
+    label = "face_up" if (white_frac >= FACEUP_WHITE_MIN and rim_edge <= RIM_EDGE_MAX and center_edge <= CENTER_EDGE_MAX) else "face_down"
 
     panel = None
     if (SAVE_WARPS or SAVE_RING_DEBUG) and make_panel:
@@ -396,7 +411,6 @@ def send_reset_reliably():
     if now - _last_reset_ts < RESET_DEBOUNCE_SEC:
         log_event(f"reset skipped (debounce {now - _last_reset_ts:.1f}s)")
         return False
-
     ws_arduino.wait_connected(WS_AWAIT_CONNECT_S)
     ok = False
     for attempt in range(1, WS_SEND_RETRIES+1):
@@ -408,7 +422,6 @@ def send_reset_reliably():
             break
         log_event(f"reset retry {attempt}/{WS_SEND_RETRIES} in {WS_RETRY_DELAY_MS}ms")
         time.sleep(WS_RETRY_DELAY_MS/1000.0)
-
     if ok: _last_reset_ts = time.time()
     else:  log_event("reset FAILED after retries")
     return ok
@@ -418,19 +431,24 @@ def main():
     os.makedirs(SAVE_DIR, exist_ok=True)
     os.makedirs(DEBUG_DIR, exist_ok=True)
 
+    _startup_summary()
+    log_event("loop starting")
+
+    # ----- SIM MODE -----
+    if SIM:
+        run_simulator()   # never returns
+        return
+
+    # From here on: real camera/vision path
     cap = cv2.VideoCapture(CAMERA_INDEX)
     if not cap.isOpened():
         print("[ERROR] camera not found")
         return
 
-    _startup_summary()
-    log_event("loop starting")
-
-    # --- WS connection state ---
+    # WS connection state
     app_start_ts = time.time()
     ws_watchdog_start = app_start_ts
     both_connected_once = False
-
 
     armed = False
     arm_streak = 0
@@ -441,14 +459,9 @@ def main():
         ts = time.strftime("%Y%m%d-%H%M%S")
         ok, frame = cap.read()
 
-        # ---------------- Both-WS connection policy ----------------
-        # We want:
-        #  (A) Startup grace: wait up to STARTUP_GRACE_S for BOTH sockets to be up at least once.
-        #  (B) After BOTH have been connected at least once, enforce a runtime watchdog:
-        #      exit if BOTH are not simultaneously UP for >= BOTH_WS_TIMEOUT_S.
+        # ---- Both-WS policy (startup grace + runtime watchdog) ----
         now = time.time()
         both_up = (ws_tablet.is_connected and ws_arduino.is_connected)
-
         if not both_connected_once:
             if both_up:
                 both_connected_once = True
@@ -457,22 +470,14 @@ def main():
             else:
                 if ENFORCE_STARTUP_GRACE and (now - app_start_ts >= STARTUP_GRACE_S):
                     log_event(f"EXIT: startup grace ({int(STARTUP_GRACE_S)}s) expired without both WS up")
-                    # One last dashboard so it’s obvious why we’re exiting
-                    render_dashboard(face_up_now=0, cards_now=0, armed=False,
-                                     arm_streak=0, zero_up_streak=0, peak_up=0)
-                    sys.exit(3)
-                # still in grace; keep looping
+                    render_dashboard(0,0,False,0,0,0); sys.exit(3)
         else:
-            # Runtime phase: watchdog
             if both_up:
-                ws_watchdog_start = now  # reset timer whenever both are up
+                ws_watchdog_start = now
             else:
                 if ENFORCE_BOTH_WS and (now - ws_watchdog_start >= BOTH_WS_TIMEOUT_S):
-                    log_event(f"EXIT: both WS not up simultaneously for "
-                              f"{int(now - ws_watchdog_start)}s (>= {int(BOTH_WS_TIMEOUT_S)}s)")
-                    render_dashboard(face_up_now=0, cards_now=0, armed=False,
-                                     arm_streak=0, zero_up_streak=0, peak_up=0)
-                    sys.exit(2)
+                    log_event(f"EXIT: both WS not up simultaneously for {int(now - ws_watchdog_start)}s")
+                    render_dashboard(0,0,False,0,0,0); sys.exit(2)
 
         if not ok:
             time.sleep(SLEEP_SEC)
@@ -480,7 +485,6 @@ def main():
             continue
 
         proc, offx, offy = _roi(frame, ROI) if sum(ROI) != 0 else (frame, 0, 0)
-
         gray = cv2.cvtColor(proc, cv2.COLOR_BGR2GRAY)
         norm = _normalize_L(gray)
         _, th = cv2.threshold(norm, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -537,11 +541,9 @@ def main():
                 fn = os.path.join(DEBUG_DIR, f"{ts}_card{idx}_{label}_crm{info['crm']}_re{info['rim_e']}.png")
                 cv2.imwrite(fn, panel)
 
-        # save full-color frame
         if SAVE_IMAGES:
             cv2.imwrite(os.path.join(SAVE_DIR, f"frame_{ts}.jpg"), frame)
 
-        # save grayscale with overlays for clarity
         if SAVE_GRAYSCALE:
             gray_vis = cv2.cvtColor(norm, cv2.COLOR_GRAY2BGR)
             for idx, (label, info, box, panel) in enumerate(cards):
@@ -556,7 +558,6 @@ def main():
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
             cv2.imwrite(os.path.join(SAVE_DIR, f"gray_{ts}.jpg"), gray_vis)
 
-        # draw dashboard last
         render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up)
         time.sleep(SLEEP_SEC)
 
