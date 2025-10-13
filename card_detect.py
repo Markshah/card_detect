@@ -146,6 +146,12 @@ def log_event(s: str):
 
 from pyfiglet import Figlet
 
+from pyfiglet import Figlet
+
+from pyfiglet import Figlet
+
+from pyfiglet import Figlet
+
 def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up):
     import sys
     sys.stdout.write("\033[2J\033[H")  # clear + home
@@ -153,36 +159,54 @@ def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, 
     GREEN  = "\033[1;32m"; RED = "\033[1;31m"; YELLOW="\033[1;33m"
     CYAN   = "\033[36m"; GRAY  = "\033[90m"
 
-    # --- Large header
+    # --- Header ---
     print(f"{BOLD}{CYAN}=== WED NIGHT POKER — CARD DETECTOR ==={RESET}")
     t_ok = ws_tablet.is_connected; a_ok = ws_arduino.is_connected
     t_color = GREEN if t_ok else RED; a_color = GREEN if a_ok else RED
     print(f"{BOLD}Tablet : {t_color}{TABLET_WS_URL}{RESET}   [{t_color}{'UP' if t_ok else 'DOWN'}{RESET}]")
     print(f"{BOLD}Arduino: {a_color}{ARDUINO_WS_URL}{RESET}   [{a_color}{'UP' if a_ok else 'DOWN'}{RESET}]")
 
-    # --- Big "Up" display
-    f = Figlet(font="big")  # try fonts: 'big', 'slant', 'banner3-D', etc.
-    big_up = f.renderText(str(face_up_now)).rstrip()
-    print(f"{GREEN}{big_up}{RESET}")
-    print(f"{BOLD}{YELLOW}CARDS UP{RESET}")
+    # --- Big Cards Up : Down Display ---
+    f = Figlet(font="big")
+    big_up_lines = f.renderText(str(face_up_now)).rstrip().splitlines()
+    down_now = max(0, cards_now - face_up_now)
+    big_down_lines = f.renderText(str(down_now)).rstrip().splitlines()
+    colon_lines = f.renderText(":").rstrip().splitlines()
 
-    # --- State line
+    # pad to equal height
+    max_lines = max(len(big_up_lines), len(colon_lines), len(big_down_lines))
+    big_up_lines += [""] * (max_lines - len(big_up_lines))
+    colon_lines += [""] * (max_lines - len(colon_lines))
+    big_down_lines += [""] * (max_lines - len(big_down_lines))
+
+    print()
+    for u, c, d in zip(big_up_lines, colon_lines, big_down_lines):
+        print(f"{GREEN}{u:<15}{YELLOW}{c:<15}{RED}{d}{RESET}")
+    print()
+    print(f"{BOLD}{YELLOW}CARDS  {GREEN}UP{RESET}:{RED}DOWN{RESET}")
+    print()
+
+    # --- State line ---
     state_txt = f"{GREEN}ARMED{RESET}" if armed else (
         f"{YELLOW}RESET{RESET}" if zero_up_streak>=ZERO_UP_CONSEC_N else f"{YELLOW}IDLE{RESET}")
-    down_now = max(0, cards_now - face_up_now)
-    print(f"{BOLD}[LIVE]{RESET} Cards={YELLOW}{cards_now}{RESET} Down={RED}{down_now}{RESET}  "
-          f"State={state_txt}  Arm={arm_streak}/{ARM_CONSEC_N}  Zero={zero_up_streak}/{ZERO_UP_CONSEC_N}")
+    print(f"{BOLD}[LIVE]{RESET} Cards={YELLOW}{cards_now}{RESET}  "
+          f"State={state_txt}  Arm={arm_streak}/{ARM_CONSEC_N}  "
+          f"Zero={zero_up_streak}/{ZERO_UP_CONSEC_N}  Peak={peak_up}")
 
-    # --- Events
+    # --- Events ---
     print(f"{GRAY}" + "-" * 72 + f"{RESET}")
     print("Recent events:")
     if events:
         for line in list(events):
-            color = GREEN if "ARMED" in line else (YELLOW if "RESET" in line else (RED if "fail" in line.lower() else GRAY))
+            color = GREEN if "ARMED" in line else (
+                YELLOW if "RESET" in line else (
+                RED if "fail" in line.lower() else GRAY))
             print("  " + color + line + RESET)
     else:
         print("  (none)")
     sys.stdout.flush()
+
+
 
 
 def _startup_summary():
