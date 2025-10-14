@@ -80,9 +80,19 @@ class WSManager:
         """Block up to timeout seconds for a connection to be established."""
         return self._connected.wait(timeout)
 
-    def send_cards_detected(self, count: int) -> bool:
-        """Send: {"command":"cards_detected", "data": {"count": N}}"""
-        return self.send_json({"command": "cards_detected", "data": {"count": int(count)}})
+    def send_cards_detected(self, count, codes=None):
+        """
+        Send current count and optional list of codes.
+        Example: {"type": "cards_detected", "count": 3, "codes": ["KD","JS"]}
+        """
+        try:
+            payload = {"command": "cards_detected", "count": int(count)}
+            if codes:
+                payload["codes"] = [c.upper() for c in codes if c]
+            self._send_json(payload)
+            return True
+        except Exception:
+            return False
 
     def send_move_dealer_forward(self) -> bool:
         """Send: {"command":"move_dealer_forward"}"""

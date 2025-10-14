@@ -224,7 +224,7 @@ def run_simulator():
     while True:
         val = int(seq[idx % len(seq)])
         peak_up = max(peak_up, val)
-        ws_tablet.send_cards_detected(val)
+        ws_tablet.send_cards_detected(val)  # no codes in SIM
         log_event(f"[SIM] cards_detected -> {val}")
         render_dashboard(face_up_now=val, cards_now=val, armed=False,
                          arm_streak=arm_streak, zero_up_streak=zero_up_streak,
@@ -377,19 +377,23 @@ _last_obs = None
 _same_streak = 0
 _last_reset_ts = 0.0
 
-def send_cards_change_or_every(count: int):
+def send_cards_change_or_every(count: int, codes=None):
+    """
+    Send immediately when count changes; otherwise every RESEND_EVERY frames.
+    Always includes 'codes' (list of strings like ['QS','10D','4C'] or pretty symbols if preferred).
+    """
     global _last_obs, _same_streak
     count = int(count)
     if _last_obs is None or count != _last_obs:
         _last_obs = count; _same_streak = 1
-        ws_tablet.send_cards_detected(count)
-        log_event(f"cards_detected -> {count} (changed)")
+        ws_tablet.send_cards_detected(count, codes=codes)
+        log_event(f"cards_detected -> {count} (changed) codes={codes or []}")
         return True
     _same_streak += 1
     if _same_streak >= RESEND_EVERY:
         _same_streak = 0
-        ws_tablet.send_cards_detected(count)
-        log_event(f"cards_detected -> {count} (periodic)")
+        ws_tablet.send_cards_detected(count, codes=codes)
+        log_event(f"cards_detected -> {count} (periodic) codes={codes or []}")
         return True
     return False
 
@@ -496,23 +500,62 @@ def main():
             cv2.imwrite(os.path.join(SAVE_DIR, f"th_{ts}.png"), th)
             cv2.imwrite(os.path.join(SAVE_DIR, f"edges_{ts}.png"), edges_full)
 
-        # detect cards
+        # detect cards (warp + rim-classify)
         cards = []
         for idx, cnt in enumerate(_card_candidates(th, proc.shape[1], proc.shape[0])):
             warp, box, (mw, mh) = _warp_from_contour(proc, cnt)
             label, info, panel = classify_by_white_rim(warp)
             cards.append((label, info, box, panel, warp))
 
+        # --- collect current codes (LEFT->RIGHT, unique, up to 5) BEFORE state machine sends ---
+        # We do minimal classification for codes here; drawing/annotating happens below.
+        THRESH = 0.60
+        hits_for_codes = []  # list of (x_pos, "Q♠") for display; and ("QS") for codes to tablet
+        hits_for_wire = []   # list of (x_pos, "QS") wire-format to send to Android
+
+        for (label, _info, box, _panel, warp) in cards:
+            if label != "face_up":
+                continue
+            out = _classify_card(warp)
+            if len(out) == 3: code, score, _rot = out
+            else:             code, score = out
+            if not code: 
+                continue
+            if score < THRESH:
+                continue
+            rank, suit = code[:-1], code[-1]
+            pretty = f"{rank}{SUIT_SYM.get(suit, '?')}"
+            x_pos = int(min(box[:,0]))  # leftmost x
+            hits_for_codes.append((x_pos, pretty))
+            hits_for_wire.append((x_pos, code.upper()))
+
+        # Build de-duped, ordered lists (up to 5)
+        hits_for_codes.sort(key=lambda t: t[0])
+        hits_for_wire.sort(key=lambda t: t[0])
+
+        seen = set(); cur_codes_pretty = []
+        for _, p in hits_for_codes:
+            if p in seen: continue
+            seen.add(p); cur_codes_pretty.append(p)
+            if len(cur_codes_pretty) == 5: break
+
+        seen2 = set(); cur_codes_wire = []
+        for _, c in hits_for_wire:
+            if c in seen2: continue
+            seen2.add(c); cur_codes_wire.append(c)
+            if len(cur_codes_wire) == 5: break
+
+        # Tally counts
         face_up_now = sum(1 for c in cards if c[0] == "face_up")
         cards_now   = len(cards)
         peak_up     = max(peak_up, face_up_now)
 
-        # --- arming/reset state machine ---
+        # --- arming/reset state machine (now sends count + codes) ---
         if not armed:
             arm_streak = arm_streak + 1 if face_up_now >= ARM_FACEUP_MIN else 0
             if arm_streak >= ARM_CONSEC_N:
                 armed = True
-                send_cards_change_or_every(face_up_now)
+                send_cards_change_or_every(face_up_now, codes=cur_codes_wire)
                 zero_up_streak = 0
                 peak_up = face_up_now
                 log_event(f"STATE -> ARMED (need {ARM_FACEUP_MIN}+ for {ARM_CONSEC_N})")
@@ -520,22 +563,19 @@ def main():
             zero_up_streak = zero_up_streak + 1 if face_up_now == 0 else 0
             if zero_up_streak >= ZERO_UP_CONSEC_N:
                 log_event(f"STATE -> RESET (zero-up for {ZERO_UP_CONSEC_N}, peak={peak_up})")
-                send_cards_change_or_every(0)
+                send_cards_change_or_every(0, codes=[])  # send zero with empty codes
                 send_reset_reliably()
                 armed = False
                 arm_streak = 0
                 zero_up_streak = 0
                 peak_up = 0
             else:
-                send_cards_change_or_every(face_up_now)
+                send_cards_change_or_every(face_up_now, codes=cur_codes_wire)
 
-        # ---- annotate + gather current codes (up to 5, left->right) ----
-        cur_hits = []  # list of (x_pos, "Q♠")
-        THRESH = 0.60
-
+        # ---- annotate/draw & optional saves (also shows pretty codes) ----
         for idx, (label, info, box, panel, warp) in enumerate(cards):
             color = (0,255,0) if label=="face_up" else (0,0,255)
-            box = (box + np.array([[offx,offy]], dtype=np.float32)).astype(int)
+            box = box.astype(int)
             cv2.polylines(frame, [box], True, color, 2)
             cv2.putText(frame, f"{idx}:{label}", tuple(box[0]), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
             if DRAW_STATS:
@@ -545,36 +585,12 @@ def main():
             if int(os.getenv("SAVE_WARP_RAW","0")):
                 cv2.imwrite(os.path.join(DEBUG_DIR, "warps_raw", f"{ts}_card{idx}.png"), warp)
 
-            if label == "face_up":
-                out = _classify_card(warp)
-                if len(out) == 3: code, score, _rot = out
-                else:             code, score = out
-
-                if code:
-                    rank, suit = code[:-1], code[-1]
-                    pretty = f"{rank}{SUIT_SYM.get(suit, '?')}"
-                    tl = box[np.argmin(box.sum(axis=1))]
-                    cv2.putText(frame, f"{pretty} ({score:.2f})",
-                                (int(tl[0]), int(tl[1]-6)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,255), 2)
-                    if score >= THRESH:
-                        x_pos = int(box[:,0].min())
-                        cur_hits.append((x_pos, pretty))
-
             if (SAVE_WARPS or SAVE_RING_DEBUG) and panel is not None:
                 fn = os.path.join(DEBUG_DIR, f"{ts}_card{idx}_{label}_crm{info['crm']}_re{info['rim_e']}.png")
                 cv2.imwrite(fn, panel)
 
-        # build cur_codes: left->right, unique, up to 5
-        cur_hits.sort(key=lambda t: t[0])
-        seen = set(); cur_codes = []
-        for _, p in cur_hits:
-            if p in seen: continue
-            seen.add(p); cur_codes.append(p)
-            if len(cur_codes) == 5: break
-
         # dashboard
-        render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up, cur_codes)
+        render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up, cur_codes_pretty)
 
         # preview window (optional)
         if SHOW_PREVIEW:
