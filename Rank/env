@@ -1,0 +1,88 @@
+# --- Camera & Loop ---
+CAMERA_INDEX=0
+SLEEP_SEC=0.0
+ROI="0,0,0,0"
+
+# --- Rim Classifier thresholds ---
+FACEUP_WHITE_MIN=0.20
+RIM_EDGE_MAX=0.09
+CENTER_EDGE_MAX=0.28
+REL_WHITE_PCT=0.60
+RIM_OUTER_FRAC=0.08
+RIM_INNER_FRAC=0.30
+WHITE_CHROMA_MAX=12
+
+# --- WS startup & runtime behavior ---
+ENFORCE_STARTUP_GRACE=1
+STARTUP_GRACE_SEC=3600     # 60 minutes
+
+ENFORCE_BOTH_WS=1
+BOTH_WS_TIMEOUT_SEC=600    # 10 minutes after both have connected once
+
+
+# --- Candidate size/shape gates ---
+CARD_AABB_MIN_FRAC=0.0018
+CARD_AABB_MAX_FRAC=0.30
+CARD_SHORTSIDE_MIN=90
+ASPECT_MIN=1.25
+ASPECT_MAX=1.75
+SOLIDITY_MIN=0.88
+FILL_OBB_MIN=0.80
+ANGLE_TOL_DEG=16
+
+# Absolute pixel gates (now optional)
+USE_ABS_PX_GUARDS=0      # 0=off (recommended), 1=fixed thresholds, 2=adaptive around recent median
+CARD_SHORT_MIN_PX=100    # used only if USE_ABS_PX_GUARDS=1
+CARD_SHORT_MAX_PX=420
+CARD_LONG_MIN_PX=160
+CARD_LONG_MAX_PX=720
+
+# --- Arming / Reset Logic ---
+ARM_FACEUP_MIN=3
+ARM_CONSEC_N=3
+ZERO_UP_CONSEC_N=3
+
+# --- Saving / Debug ---
+SAVE_IMAGES=0
+SAVE_WARPS=0
+SAVE_GRAYSCALE=0          # save gray with detection overlays
+SAVE_MASKS=0              # save norm/otsu/edges per frame
+SAVE_WARP_RAW=0
+DEBUG_EDGE_LOW=30
+DEBUG_EDGE_HIGH=90
+SAVE_RING_DEBUG=0         # force saving ring panels for each detected card
+LOG_REJECTIONS=0          # print reject reasons (area/aspect/px/etc.)
+DRAW_LABEL_STATS=1
+DASH_ROWS=5               # number of recent events
+QUIET_LOGS=1
+WARP_W=400
+WARP_H=560
+
+# Use L-only rim logic (robust under purple/ambient shifts)
+USE_GRAYSCALE_ONLY=1
+
+# --- WebSockets (dual destinations) ---
+TABLET_WS_URL=ws://192.168.1.246:8765
+ARDUINO_WS_URL=ws://192.168.1.245:8888
+
+# Optional burst/retry knobs for Arduino reset
+WS_BURST_SENDS=1
+WS_BURST_SPACING_MS=40
+WS_SEND_RETRIES=4
+WS_RETRY_DELAY_MS=150
+WS_AWAIT_CONNECT_SEC=1.5
+RESET_DEBOUNCE_SEC=1.2
+
+# Resend policy
+RESEND_EVERY=5
+
+# Paths (optional)
+SAVE_FRAME_DIR=./frames
+DEBUG_DUMP_DIR=./debug
+
+CARD_TEMPL_DIR=./card_templates
+RANK_MIN_SCORE=0.42
+SUIT_MIN_SCORE=0.40
+NCC_MARGIN_MIN=0.03
+
+
