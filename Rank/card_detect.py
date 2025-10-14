@@ -1,23 +1,18 @@
 #!/usr/bin/env python3
-# card_detect.py — face-up/down by white rim + arming/reset + dual-WS sends + static console dashboard
-import os, sys, cv2, time, json, atexit, numpy as np, logging
+# card_detect.py — face-up/down by white rim + arming/reset + dual-WS sends + dashboard
+import os, sys, cv2, time, atexit, numpy as np, logging
 from collections import deque
 from dotenv import load_dotenv
 from pyfiglet import Figlet
-from rank_suit import classify_fullcard
-from rank_suit import classify_fullcard_anyrot
 
-
-
+# --- recognizer import (flexible: any-rotation if available) ---
+try:
+    from rank_suit import classify_fullcard_anyrot as _classify_card  # returns (code, score, rot)
+except ImportError:
+    from rank_suit import classify_fullcard as _classify_card         # returns (code, score)
 
 SUIT_SYM = {"S":"♠","H":"♥","D":"♦","C":"♣"}
-INV_SYM = {"♠":"S","♥":"H","♦":"D","♣":"C"}
-
-LAST_CODES = deque(maxlen=1)   # last few recognized cards
-
-
-
-
+INV_SYM  = {"♠":"S","♥":"H","♦":"D","♣":"C"}  # for ASCII figlet
 
 # ---------------- env ----------------
 if os.path.exists("env"): load_dotenv("env")
@@ -25,27 +20,19 @@ def _b(k, d="0"): return os.getenv(k, d).strip().lower() in ("1","true","yes")
 
 # --------- simple "-KEY value" CLI parser ---------
 def parse_dash_args(argv):
-    """
-    Parses args like:  -CAMERA_INDEX 1 -SAVE_IMAGES 1 -ROI "100,100,800,600"
-    Returns a dict:    {'CAMERA_INDEX':'1', 'SAVE_IMAGES':'1', 'ROI':'100,100,800,600'}
-    """
     args = {}
     key = None
     for token in argv:
         if token.startswith('-') and not token.startswith('--'):
-            key = token.lstrip('-')
-            args[key] = None
+            key = token.lstrip('-'); args[key] = None
         else:
-            if key:
-                args[key] = token
-                key = None
+            if key: args[key] = token; key = None
     return args
 
 _cli = parse_dash_args(sys.argv[1:])
 if _cli:
     print("[CLI overrides detected]", _cli)
-for k, v in _cli.items():
-    os.environ[k] = v
+for k, v in _cli.items(): os.environ[k] = v
 
 def _get_csv_ints(name, default="0,0,0,0"):
     raw = os.getenv(name, default)
@@ -56,10 +43,8 @@ def _get_csv_ints(name, default="0,0,0,0"):
 QUIET_LOGS = _b("QUIET_LOGS", "1")
 
 # number of recent events
-DASH_ROWS  = int(os.getenv("DASH_ROWS", "6")) 
-
+DASH_ROWS  = int(os.getenv("DASH_ROWS", "6"))
 SHOW_PREVIEW = int(os.getenv("SHOW_PREVIEW", "0"))
-
 
 # ---- camera / I/O ----
 CAMERA_INDEX = int(os.getenv("CAMERA_INDEX", "0"))
@@ -70,7 +55,7 @@ DEBUG_DIR    = os.getenv("DEBUG_DUMP_DIR", "./debug")
 DRAW_STATS   = _b("DRAW_LABEL_STATS","1")
 WARP_SIZE    = (int(os.getenv("WARP_W","400")), int(os.getenv("WARP_H","560")))
 
-# ---- SIM MODE (new) ----
+# ---- SIM MODE ----
 SIM              = int(os.getenv("SIM","0"))   # enable with -SIM 1
 SIM_INTERVAL_SEC = float(os.getenv("SIM_INTERVAL_SEC","12"))
 SIM_VALUES       = os.getenv("SIM_VALUES","3,0")  # sequence to alternate through (default 3,0)
@@ -115,7 +100,6 @@ CARD_SHORT_MAX_PX = int(os.getenv("CARD_SHORT_MAX_PX", "420"))
 CARD_LONG_MIN_PX  = int(os.getenv("CARD_LONG_MIN_PX",  "160"))
 CARD_LONG_MAX_PX  = int(os.getenv("CARD_LONG_MAX_PX",  "720"))
 
-from collections import deque
 _ADAPT_SHORT = deque(maxlen=40)
 _ADAPT_LONG  = deque(maxlen=40)
 ADAPT_SLOP_S = 60
@@ -161,10 +145,7 @@ def log_event(s: str):
     ts = time.strftime("%H:%M:%S")
     events.appendleft(f"{ts}  {s}")
 
-
-
-def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up, last_codes):
-
+def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up, cur_codes):
     import sys
     sys.stdout.write("\033[2J\033[H")  # clear + home
     RESET  = "\033[0m"; BOLD   = "\033[1m"
@@ -178,26 +159,22 @@ def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, 
     print(f"{BOLD}Tablet : {t_color}{TABLET_WS_URL}{RESET}   [{t_color}{'UP' if t_ok else 'DOWN'}{RESET}]")
     print(f"{BOLD}Arduino: {a_color}{ARDUINO_WS_URL}{RESET}   [{a_color}{'UP' if a_ok else 'DOWN'}{RESET}]")
 
-    # --- Big Cards Up : Down Display ---
+    # --- Big current recognized cards (up to 5) ---
+    if cur_codes:
+        pretty_line = "  ".join(cur_codes[:5])      # "Q♠  10♦  4♣"
+        ascii_line  = "".join(INV_SYM.get(ch, ch) for ch in pretty_line)  # "QS  10D  4C"
+        f2 = Figlet(font="big")
+        for line in f2.renderText(ascii_line).rstrip().splitlines():
+            print(GREEN + line + RESET)
+        print(f"{BOLD}{YELLOW}{pretty_line}{RESET}\n")
+
+    # --- Big Cards Up : Down ---
     f = Figlet(font="big")
     big_up_lines = f.renderText(str(face_up_now)).rstrip().splitlines()
     down_now = max(0, cards_now - face_up_now)
     big_down_lines = f.renderText(str(down_now)).rstrip().splitlines()
     colon_lines = f.renderText(":").rstrip().splitlines()
 
-    # --- Big last recognized cards ---
-    if last_codes:
-        # symbols normal size (pretty)
-        pretty_line = "  ".join(last_codes)            # e.g., "Q♠  10♦  4♣"
-        # ASCII for FIGlet
-        ascii_line = "".join(INV_SYM.get(ch, ch) for ch in pretty_line)  # "QS  10D  4C"
-    
-        f2 = Figlet(font="big")
-        for line in f2.renderText(ascii_line).rstrip().splitlines():
-            print(f"{GREEN}{line}{RESET}")
-        print(f"{BOLD}{YELLOW}{pretty_line}{RESET}\n")
-
-    # pad to equal height
     max_lines = max(len(big_up_lines), len(colon_lines), len(big_down_lines))
     big_up_lines += [""] * (max_lines - len(big_up_lines))
     colon_lines += [""] * (max_lines - len(colon_lines))
@@ -207,8 +184,7 @@ def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, 
     for u, c, d in zip(big_up_lines, colon_lines, big_down_lines):
         print(f"{GREEN}{u:<15}{YELLOW}{c:<15}{RED}{d}{RESET}")
     print()
-    print(f"{BOLD}{YELLOW}CARDS  {GREEN}UP{RESET}:{RED}DOWN{RESET}")
-    print()
+    print(f"{BOLD}{YELLOW}CARDS  {GREEN}UP{RESET}:{RED}DOWN{RESET}\n")
 
     # --- State line ---
     state_txt = f"{GREEN}ARMED{RESET}" if armed else (
@@ -222,17 +198,11 @@ def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, 
     print("Recent events:")
     if events:
         for line in list(events):
-            color = GREEN if "ARMED" in line else (
-                YELLOW if "RESET" in line else (
-                RED if "fail" in line.lower() else GRAY))
+            color = GREEN if "ARMED" in line else (YELLOW if "RESET" in line else (RED if "fail" in line.lower() else GRAY))
             print("  " + color + line + RESET)
     else:
         print("  (none)")
     sys.stdout.flush()
-
-
-
-
 
 def _startup_summary():
     t_ok = ws_tablet.wait_connected(2.0)
@@ -240,31 +210,25 @@ def _startup_summary():
     log_event(f"Tablet {'connected' if t_ok else 'pending'}")
     log_event(f"Arduino {'connected' if a_ok else 'pending'}")
 
-# ---------------- SIM MODE LOOP (new) ----------------
+# ---------------- SIM MODE LOOP ----------------
 def run_simulator():
-    """Alternate sending counts to the TABLET: e.g., 3 -> 0 -> 3 -> 0 every N seconds."""
-    # parse sequence (default "3,0")
     try:
         seq = [int(s.strip()) for s in SIM_VALUES.split(",") if s.strip() != ""]
     except ValueError:
         seq = [3, 0]
-    if not seq:
-        seq = [3, 0]
+    if not seq: seq = [3, 0]
 
     log_event(f"SIM MODE: sequence={seq} interval={SIM_INTERVAL_SEC:.1f}s  (to Tablet only)")
     idx = 0
-    arm_streak = 0
-    zero_up_streak = 0
-    peak_up = 0
+    arm_streak = 0; zero_up_streak = 0; peak_up = 0
     while True:
         val = int(seq[idx % len(seq)])
         peak_up = max(peak_up, val)
-        ws_tablet.send_cards_detected(val)  # send directly each tick
+        ws_tablet.send_cards_detected(val)
         log_event(f"[SIM] cards_detected -> {val}")
         render_dashboard(face_up_now=val, cards_now=val, armed=False,
-                 arm_streak=arm_streak, zero_up_streak=zero_up_streak,
-                 peak_up=peak_up, last_codes=LAST_CODES)
-
+                         arm_streak=arm_streak, zero_up_streak=zero_up_streak,
+                         peak_up=peak_up, cur_codes=[])
         time.sleep(SIM_INTERVAL_SEC)
         idx += 1
 
@@ -315,17 +279,13 @@ def _card_candidates(mask, frame_w, frame_h):
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        if area < 3000:
-            _rej(f"[rej] area<3000 area={area:.0f}")
-            continue
+        if area < 3000: _rej(f"[rej] area<3000 area={area:.0f}"); continue
         x,y,w,h = cv2.boundingRect(cnt)
         aabb_frac = (w*h)/float(frame_w*frame_h + 1e-6)
         if not (CARD_AABB_MIN_FRAC <= aabb_frac <= CARD_AABB_MAX_FRAC):
-            _rej(f"[rej] aabb_frac={aabb_frac:.5f} wh=({w},{h})")
-            continue
+            _rej(f"[rej] aabb_frac={aabb_frac:.5f} wh=({w},{h})"); continue
         if min(w,h) < CARD_SHORTSIDE_MIN:
-            _rej(f"[rej] shortside_min={min(w,h)} < {CARD_SHORTSIDE_MIN}")
-            continue
+            _rej(f"[rej] shortside_min={min(w,h)} < {CARD_SHORTSIDE_MIN}"); continue
 
         hull = cv2.convexHull(cnt)
         solidity = area / (cv2.contourArea(hull)+1e-6)
@@ -333,16 +293,13 @@ def _card_candidates(mask, frame_w, frame_h):
         asp = max(mw,mh)/max(1.0,min(mw,mh))
         obb_fill = area / (mw*mh + 1e-6)
         if not (ASPECT_MIN <= asp <= ASPECT_MAX):
-            _rej(f"[rej] aspect={asp:.3f} not in [{ASPECT_MIN},{ASPECT_MAX}]")
-            continue
+            _rej(f"[rej] aspect={asp:.3f} not in [{ASPECT_MIN},{ASPECT_MAX}]"); continue
         if solidity < SOLIDITY_MIN or obb_fill < FILL_OBB_MIN:
-            _rej(f"[rej] solidity/fill={solidity:.3f}/{obb_fill:.3f}")
-            continue
+            _rej(f"[rej] solidity/fill={solidity:.3f}/{obb_fill:.3f}"); continue
 
         quad = cv2.boxPoints(cv2.minAreaRect(cnt))
         if not _right_angle_quad(quad):
-            _rej("[rej] angles off 90±tol")
-            continue
+            _rej("[rej] angles off 90±tol"); continue
 
         short_px = min(mw, mh); long_px = max(mw, mh)
         _ADAPT_SHORT.append(short_px); _ADAPT_LONG.append(long_px)
@@ -350,15 +307,14 @@ def _card_candidates(mask, frame_w, frame_h):
         if USE_ABS_PX_GUARDS == 1:
             if not (CARD_SHORT_MIN_PX <= short_px <= CARD_SHORT_MAX_PX and
                     CARD_LONG_MIN_PX  <= long_px  <= CARD_LONG_MAX_PX):
-                _rej(f"[rej] abs_px short={short_px:.0f} long={long_px:.0f}")
-                continue
+                _rej(f"[rej] abs_px short={short_px:.0f} long={long_px:.0f}"); continue
         elif USE_ABS_PX_GUARDS == 2 and len(_ADAPT_SHORT) >= 5:
-            ms, ml = np.median(_ADAPT_SHORT), np.median(_ADAPT_LONG)
+            import numpy as _np
+            ms, ml = _np.median(_ADAPT_SHORT), _np.median(_ADAPT_LONG)
             if not (ms-ADAPT_SLOP_S <= short_px <= ms+ADAPT_SLOP_S and
                     ml-ADAPT_SLOP_L <= long_px  <= ml+ADAPT_SLOP_L):
                 _rej(f"[rej] abs_px_adapt short={short_px:.0f}/{ms:.0f} long={long_px:.0f}/{ml:.0f}")
                 continue
-
         yield cnt
 
 # -------------- ring-only classifier --------------
@@ -463,36 +419,31 @@ def main():
     os.makedirs(SAVE_DIR, exist_ok=True)
     os.makedirs(DEBUG_DIR, exist_ok=True)
 
-    # NEW: toggle raw warp saving (for template builder)
     SAVE_WARP_RAW = int(os.getenv("SAVE_WARP_RAW", "0"))
     if SAVE_WARP_RAW:
         os.makedirs(os.path.join(DEBUG_DIR, "warps_raw"), exist_ok=True)
 
     _startup_summary()
-    # Step 3: warn if templates are missing
+    # templates presence warning
     try:
-        full_dir = os.getenv("CARD_FULL_TEMPL_DIR", "./card_templates")  # <— was ./card_templates/full
+        full_dir = os.getenv("CARD_FULL_TEMPL_DIR", "./card_templates")
         files = [f for f in os.listdir(full_dir) if f.lower().endswith((".png",".jpg",".jpeg"))]
         if len(files) < 52:
             log_event(f"WARNING: expected 52 full-card templates in {full_dir} (found {len(files)})")
     except FileNotFoundError:
         log_event("WARNING: full-card template dir not found — place 52 images in ./card_templates")
 
-
     log_event("loop starting")
 
-    # ----- SIM MODE -----
     if SIM:
-        run_simulator()   # never returns
+        run_simulator()
         return
 
-    # From here on: real camera/vision path
     cap = cv2.VideoCapture(CAMERA_INDEX)
     if not cap.isOpened():
         print("[ERROR] camera not found")
         return
 
-    # WS connection state
     app_start_ts = time.time()
     ws_watchdog_start = app_start_ts
     both_connected_once = False
@@ -517,18 +468,20 @@ def main():
             else:
                 if ENFORCE_STARTUP_GRACE and (now - app_start_ts >= STARTUP_GRACE_S):
                     log_event(f"EXIT: startup grace ({int(STARTUP_GRACE_S)}s) expired without both WS up")
-                    render_dashboard(0,0,False,0,0,0, LAST_CODES); sys.exit(3)
+                    render_dashboard(0,0,False,0,0,0, cur_codes=[])
+                    sys.exit(3)
         else:
             if both_up:
                 ws_watchdog_start = now
             else:
                 if ENFORCE_BOTH_WS and (now - ws_watchdog_start >= BOTH_WS_TIMEOUT_S):
                     log_event(f"EXIT: both WS not up simultaneously for {int(now - ws_watchdog_start)}s")
-                    render_dashboard(0,0,False,0,0,0, LAST_CODES); sys.exit(2)
+                    render_dashboard(0,0,False,0,0,0, cur_codes=[])
+                    sys.exit(2)
 
         if not ok:
             time.sleep(SLEEP_SEC)
-            render_dashboard(0, 0, armed, arm_streak, zero_up_streak, peak_up, LAST_CODES)
+            render_dashboard(0, 0, armed, arm_streak, zero_up_streak, peak_up, cur_codes=[])
             continue
 
         # ---- preprocess & threshold ----
@@ -543,17 +496,18 @@ def main():
             cv2.imwrite(os.path.join(SAVE_DIR, f"th_{ts}.png"), th)
             cv2.imwrite(os.path.join(SAVE_DIR, f"edges_{ts}.png"), edges_full)
 
+        # detect cards
         cards = []
         for idx, cnt in enumerate(_card_candidates(th, proc.shape[1], proc.shape[0])):
             warp, box, (mw, mh) = _warp_from_contour(proc, cnt)
             label, info, panel = classify_by_white_rim(warp)
-            cards.append((label, info, box, panel, warp))  # NEW: keep warp for rank/suit
+            cards.append((label, info, box, panel, warp))
 
         face_up_now = sum(1 for c in cards if c[0] == "face_up")
         cards_now   = len(cards)
         peak_up     = max(peak_up, face_up_now)
 
-        # --- arming/reset state machine (unchanged) ---
+        # --- arming/reset state machine ---
         if not armed:
             arm_streak = arm_streak + 1 if face_up_now >= ARM_FACEUP_MIN else 0
             if arm_streak >= ARM_CONSEC_N:
@@ -575,7 +529,10 @@ def main():
             else:
                 send_cards_change_or_every(face_up_now)
 
-        # ---- annotate, save, and (NEW) rank/suit overlay ----
+        # ---- annotate + gather current codes (up to 5, left->right) ----
+        cur_hits = []  # list of (x_pos, "Q♠")
+        THRESH = 0.60
+
         for idx, (label, info, box, panel, warp) in enumerate(cards):
             color = (0,255,0) if label=="face_up" else (0,0,255)
             box = (box + np.array([[offx,offy]], dtype=np.float32)).astype(int)
@@ -583,54 +540,43 @@ def main():
             cv2.putText(frame, f"{idx}:{label}", tuple(box[0]), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
             if DRAW_STATS:
                 s = f"crm={info.get('crm',0):.3f} rim_e={info.get('rim_e',0):.3f} c={info.get('center_ed',0):.3f}"
-                cv2.putText(frame, s, (box[0][0], box[0][1]+18),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+                cv2.putText(frame, s, (box[0][0], box[0][1]+18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
-            # NEW: optionally save raw warps for template builder
-            if SAVE_WARP_RAW:
+            if int(os.getenv("SAVE_WARP_RAW","0")):
                 cv2.imwrite(os.path.join(DEBUG_DIR, "warps_raw", f"{ts}_card{idx}.png"), warp)
 
-            # Full-card identity (face-up only)
             if label == "face_up":
-                code, score, rot = classify_fullcard_anyrot(warp)  # NEW
+                out = _classify_card(warp)
+                if len(out) == 3: code, score, _rot = out
+                else:             code, score = out
+
                 if code:
-                    rank, suit = code[:-1], code[-1]           # '4','C'
-                    pretty = f"{rank}{SUIT_SYM.get(suit, '?')}"  # '4♣'
-                    tl = box[np.argmin(box.sum(axis=1))]        # top-left of quad
+                    rank, suit = code[:-1], code[-1]
+                    pretty = f"{rank}{SUIT_SYM.get(suit, '?')}"
+                    tl = box[np.argmin(box.sum(axis=1))]
                     cv2.putText(frame, f"{pretty} ({score:.2f})",
                                 (int(tl[0]), int(tl[1]-6)),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,255), 2)
-                    if score >= 0.60:  # same threshold
-                        if not LAST_CODES or LAST_CODES[0] != pretty:
-                            LAST_CODES.appendleft(pretty)
-
-
-
+                    if score >= THRESH:
+                        x_pos = int(box[:,0].min())
+                        cur_hits.append((x_pos, pretty))
 
             if (SAVE_WARPS or SAVE_RING_DEBUG) and panel is not None:
                 fn = os.path.join(DEBUG_DIR, f"{ts}_card{idx}_{label}_crm{info['crm']}_re{info['rim_e']}.png")
                 cv2.imwrite(fn, panel)
 
-        if SAVE_IMAGES:
-            cv2.imwrite(os.path.join(SAVE_DIR, f"frame_{ts}.jpg"), frame)
+        # build cur_codes: left->right, unique, up to 5
+        cur_hits.sort(key=lambda t: t[0])
+        seen = set(); cur_codes = []
+        for _, p in cur_hits:
+            if p in seen: continue
+            seen.add(p); cur_codes.append(p)
+            if len(cur_codes) == 5: break
 
-        if SAVE_GRAYSCALE:
-            gray_vis = cv2.cvtColor(norm, cv2.COLOR_GRAY2BGR)
-            for idx, (label, info, box, panel, warp) in enumerate(cards):
-                color = (0,255,0) if label=="face_up" else (0,0,255)
-                box_g = (box - np.array([[offx,offy]], dtype=np.float32)).astype(int)
-                cv2.polylines(gray_vis, [box_g], True, color, 2)
-                cv2.putText(gray_vis, f"{idx}:{label}", tuple(box_g[0]),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-                if DRAW_STATS:
-                    s = f"crm={info.get('crm',0):.3f} rim_e={info.get('rim_e',0):.3f} c={info.get('center_ed',0):.3f}"
-                    cv2.putText(gray_vis, s, (box_g[0][0], box_g[0][1]+18),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-            cv2.imwrite(os.path.join(SAVE_DIR, f"gray_{ts}.jpg"), gray_vis)
+        # dashboard
+        render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up, cur_codes)
 
-        render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up, LAST_CODES)
-
-        # ---- show live preview ----
+        # preview window (optional)
         if SHOW_PREVIEW:
             cv2.imshow("Card Detector", frame)
             if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -638,10 +584,8 @@ def main():
 
         time.sleep(SLEEP_SEC)
 
-    # after the while True: loop
     cap.release()
     cv2.destroyAllWindows()
-
 
 if __name__ == "__main__":
     main()
