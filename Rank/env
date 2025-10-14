@@ -53,8 +53,11 @@ DEBUG_EDGE_HIGH=90
 SAVE_RING_DEBUG=0         # force saving ring panels for each detected card
 LOG_REJECTIONS=0          # print reject reasons (area/aspect/px/etc.)
 DRAW_LABEL_STATS=1
-DASH_ROWS=5               # number of recent events
+DASH_ROWS=3               # number of recent events
 QUIET_LOGS=1
+DASH_BIGTEXT=0          # (new) skip heavy Figlet banners
+DRAW_OVERLAYS=0         # (new) don't draw boxes/labels on the frame
+
 WARP_W=400
 WARP_H=560
 

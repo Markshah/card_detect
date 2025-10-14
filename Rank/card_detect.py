@@ -145,64 +145,85 @@ def log_event(s: str):
     ts = time.strftime("%H:%M:%S")
     events.appendleft(f"{ts}  {s}")
 
+
 def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up, cur_codes):
-    import sys
-    sys.stdout.write("\033[2J\033[H")  # clear + home
+    import os, sys
+    from pyfiglet import Figlet
+
+    # fast console clear
+    sys.stdout.write("\033[2J\033[H")
+
+    # colors
     RESET  = "\033[0m"; BOLD   = "\033[1m"
     GREEN  = "\033[1;32m"; RED = "\033[1;31m"; YELLOW="\033[1;33m"
-    CYAN   = "\033[36m"; GRAY  = "\033[90m"
+    CYAN   = "\033[36m"; GRAY  = "\033[90m"; BLUE = "\033[34m"
+
+    DASH_BIGTEXT = int(os.getenv("DASH_BIGTEXT","0"))
+    dash_rows    = int(os.getenv("DASH_ROWS","5"))
 
     # --- Header ---
-    print(f"{BOLD}{CYAN}=== WED NIGHT POKER — CARD DETECTOR ==={RESET}")
+    print(f"{BOLD}\033[34m=== WED NIGHT POKER — CARD DETECTOR ==={RESET}")  # title blue
     t_ok = ws_tablet.is_connected; a_ok = ws_arduino.is_connected
-    t_color = GREEN if t_ok else RED; a_color = GREEN if a_ok else RED
+    t_color = GREEN if t_ok else RED
+    a_color = GREEN if a_ok else RED
     print(f"{BOLD}Tablet : {t_color}{TABLET_WS_URL}{RESET}   [{t_color}{'UP' if t_ok else 'DOWN'}{RESET}]")
     print(f"{BOLD}Arduino: {a_color}{ARDUINO_WS_URL}{RESET}   [{a_color}{'UP' if a_ok else 'DOWN'}{RESET}]")
 
-    # --- Big current recognized cards (up to 5) ---
-    if cur_codes:
-        pretty_line = "  ".join(cur_codes[:5])      # "Q♠  10♦  4♣"
-        ascii_line  = "".join(INV_SYM.get(ch, ch) for ch in pretty_line)  # "QS  10D  4C"
+    # --- Current recognized codes (pretty), up to 5 ---
+    pretty_codes = "  ".join(cur_codes[:5]) if cur_codes else ""
+    if DASH_BIGTEXT and pretty_codes:
+        ascii_line = "".join(INV_SYM.get(ch, ch) for ch in pretty_codes)  # QS 10D 4C
         f2 = Figlet(font="big")
         for line in f2.renderText(ascii_line).rstrip().splitlines():
             print(GREEN + line + RESET)
-        print(f"{BOLD}{YELLOW}{pretty_line}{RESET}\n")
+        print(f"{BOLD}{YELLOW}{pretty_codes}{RESET}\n")
+    elif pretty_codes:
+        print(f"{BOLD}Codes:{RESET} {GREEN}{pretty_codes}{RESET}")
 
-    # --- Big Cards Up : Down ---
-    f = Figlet(font="big")
-    big_up_lines = f.renderText(str(face_up_now)).rstrip().splitlines()
+    # --- UP : DOWN summary ---
     down_now = max(0, cards_now - face_up_now)
-    big_down_lines = f.renderText(str(down_now)).rstrip().splitlines()
-    colon_lines = f.renderText(":").rstrip().splitlines()
+    if DASH_BIGTEXT:
+        f = Figlet(font="big")
+        big_up_lines   = f.renderText(str(face_up_now)).rstrip().splitlines()
+        big_down_lines = f.renderText(str(down_now)).rstrip().splitlines()
+        colon_lines    = f.renderText(":").rstrip().splitlines()
 
-    max_lines = max(len(big_up_lines), len(colon_lines), len(big_down_lines))
-    big_up_lines += [""] * (max_lines - len(big_up_lines))
-    colon_lines += [""] * (max_lines - len(colon_lines))
-    big_down_lines += [""] * (max_lines - len(big_down_lines))
+        max_lines = max(len(big_up_lines), len(colon_lines), len(big_down_lines))
+        big_up_lines   += [""] * (max_lines - len(big_up_lines))
+        colon_lines    += [""] * (max_lines - len(colon_lines))
+        big_down_lines += [""] * (max_lines - len(big_down_lines))
 
-    print()
-    for u, c, d in zip(big_up_lines, colon_lines, big_down_lines):
-        print(f"{GREEN}{u:<15}{YELLOW}{c:<15}{RED}{d}{RESET}")
-    print()
-    print(f"{BOLD}{YELLOW}CARDS  {GREEN}UP{RESET}:{RED}DOWN{RESET}\n")
+        print()
+        for u, c, d in zip(big_up_lines, colon_lines, big_down_lines):
+            print(f"{GREEN}{u:<15}{YELLOW}{c:<15}{RED}{d}{RESET}")
+        print()
+        print(f"{BOLD}{YELLOW}CARDS  {GREEN}UP{RESET}:{RED}DOWN{RESET}\n")
+    else:
+        print(f"{BOLD}{YELLOW}UP{RESET}:{GREEN}{face_up_now}{RESET}  "
+              f"{YELLOW}DOWN{RESET}:{RED}{down_now}{RESET}\n")
 
     # --- State line ---
-    state_txt = f"{GREEN}ARMED{RESET}" if armed else (
-        f"{YELLOW}RESET{RESET}" if zero_up_streak>=ZERO_UP_CONSEC_N else f"{YELLOW}IDLE{RESET}")
+    if armed:
+        state_txt = f"{GREEN}ARMED{RESET}"
+    else:
+        state_txt = f"{YELLOW}RESET{RESET}" if zero_up_streak >= ZERO_UP_CONSEC_N else f"{YELLOW}IDLE{RESET}"
+
     print(f"{BOLD}[LIVE]{RESET} Cards={YELLOW}{cards_now}{RESET}  "
           f"State={state_txt}  Arm={arm_streak}/{ARM_CONSEC_N}  "
           f"Zero={zero_up_streak}/{ZERO_UP_CONSEC_N}  Peak={peak_up}")
 
-    # --- Events ---
-    print(f"{GRAY}" + "-" * 72 + f"{RESET}")
-    print("Recent events:")
-    if events:
-        for line in list(events):
+    # --- Events (optional) ---
+    if dash_rows > 0 and events:
+        print(f"{GRAY}" + "-" * 72 + f"{RESET}")
+        print("Recent events:")
+        # show up to dash_rows most-recent entries
+        for line in list(events)[:dash_rows]:
             color = GREEN if "ARMED" in line else (YELLOW if "RESET" in line else (RED if "fail" in line.lower() else GRAY))
             print("  " + color + line + RESET)
-    else:
-        print("  (none)")
+
     sys.stdout.flush()
+
+
 
 def _startup_summary():
     t_ok = ws_tablet.wait_connected(2.0)
