@@ -462,7 +462,6 @@ def send_codes_if_new(count: int, codes):
 
 
 # -------------- main --------------
-
 def main():
     os.makedirs(SAVE_DIR, exist_ok=True)
     os.makedirs(DEBUG_DIR, exist_ok=True)
@@ -501,9 +500,13 @@ def main():
     zero_up_streak = 0
     peak_up = 0
 
-    # --- track last codes we have sent to the tablet ---
-    global _last_codes, _last_obs, _same_streak
-    _last_codes = []
+    # detection-order codes (index 0..2 = flop, 3 = turn, 4 = river)
+    det_codes = []  # e.g. ["7H","JC","3D","UNK","UNK"]
+
+    # for periodic sender sync when we push a codes update
+    global _last_obs, _same_streak
+    _last_obs = None
+    _same_streak = 0
 
     while True:
         ts = time.strftime("%Y%m%d-%H%M%S")
@@ -555,24 +558,32 @@ def main():
             label, info, panel = classify_by_white_rim(warp)
             cards.append((label, info, box, panel, warp))
 
-        # ---- compute counts FIRST ----
+        # ---- counts FIRST ----
+        prev_count = len(det_codes)
         face_up_now = sum(1 for c in cards if c[0] == "face_up")
         cards_now   = len(cards)
         peak_up     = max(peak_up, face_up_now)
 
-        # Maintain / trim last-known codes based on current count
+        # ---- maintain detection-order list length (append UNK on increase; truncate on decrease; clear on zero) ----
         if face_up_now == 0:
-            _last_codes = []
-        elif _last_codes:
-            _last_codes = _last_codes[:min(len(_last_codes), face_up_now)]
+            det_codes = []
+        elif face_up_now > prev_count:
+            det_codes += ["UNK"] * (face_up_now - prev_count)
+        elif face_up_now < prev_count:
+            det_codes = det_codes[:face_up_now]
 
-        # ---- state machine: send COUNT immediately; include codes only if at/above threshold ----
+        # ---- helper: codes to include with count (only at/above threshold; always detection order) ----
+        def _codes_for_tablet():
+            if face_up_now < ARM_FACEUP_MIN or face_up_now == 0:
+                return None
+            return list(det_codes)  # same order: flop0, flop1, flop2, turn, river
+
+        # ---- state machine: send COUNT immediately (include codes only if at/above threshold) ----
         if not armed:
             arm_streak = arm_streak + 1 if face_up_now >= ARM_FACEUP_MIN else 0
             if arm_streak >= ARM_CONSEC_N:
                 armed = True
-                codes_for_now = (_last_codes[:face_up_now] if (face_up_now >= ARM_FACEUP_MIN and _last_codes) else None)
-                send_cards_change_or_every(face_up_now, codes=codes_for_now)
+                send_cards_change_or_every(face_up_now, codes=_codes_for_tablet())
                 zero_up_streak = 0
                 peak_up = face_up_now
                 log_event(f"STATE -> ARMED (need {ARM_FACEUP_MIN}+ for {ARM_CONSEC_N})")
@@ -586,15 +597,13 @@ def main():
                 arm_streak = 0
                 zero_up_streak = 0
                 peak_up = 0
-                _last_codes = []  # clear cache
+                det_codes = []
             else:
-                codes_for_now = (_last_codes[:face_up_now] if (face_up_now >= ARM_FACEUP_MIN and _last_codes) else None)
-                send_cards_change_or_every(face_up_now, codes=codes_for_now)
+                send_cards_change_or_every(face_up_now, codes=_codes_for_tablet())
 
-        # ---- NOW classify codes (LEFT->RIGHT, unique, up to 5) ----
+        # ---- classify codes (LEFT->RIGHT for this frame), then fill UNKs in detection order ----
         THRESH = 0.60
-        hits_for_codes = []
-        hits_for_wire  = []
+        hits_for_wire = []  # [(x_left, "QS"), ...], left->right per *frame*
         for (label, _info, box, _panel, warp) in cards:
             if label != "face_up":
                 continue
@@ -603,39 +612,55 @@ def main():
             else:             code, score = out
             if not code or score < THRESH:
                 continue
-            rank, suit = code[:-1], code[-1]
-            pretty = f"{rank}{SUIT_SYM.get(suit, '?')}"
-            x_pos = int(min(box[:,0]))  # leftmost x for ordering
-            hits_for_codes.append((x_pos, pretty))
+            x_pos = int(min(box[:,0]))
             hits_for_wire.append((x_pos, code.upper()))
-
-        hits_for_codes.sort(key=lambda t: t[0])
         hits_for_wire.sort(key=lambda t: t[0])
 
-        seen = set(); cur_codes_pretty = []
-        for _, p in hits_for_codes:
-            if p in seen: continue
-            seen.add(p); cur_codes_pretty.append(p)
-            if len(cur_codes_pretty) == 5: break
+        # ---- merge: fill UNK slots only; never reorder known slots ----
+        changed = False
+        if face_up_now >= ARM_FACEUP_MIN and face_up_now > 0 and hits_for_wire:
+            from collections import Counter, deque
+            seen_now = [c for _, c in hits_for_wire]
+            remaining_counts = Counter(seen_now)
 
-        seen2 = set(); cur_codes_wire = []
-        for _, c in hits_for_wire:
-            if c in seen2: continue
-            seen2.add(c); cur_codes_wire.append(c)
-            if len(cur_codes_wire) == 5: break
+            # subtract codes already locked in det_codes
+            for c in det_codes:
+                if c != "UNK" and remaining_counts[c] > 0:
+                    remaining_counts[c] -= 1
 
-        # ---- push codes update only if at/above threshold and changed; keep cache in sync ----
-        if face_up_now >= ARM_FACEUP_MIN:
-            if list(cur_codes_wire) != _last_codes:
-                ws_tablet.send_cards_detected(face_up_now, codes=cur_codes_wire)
-                log_event(f"codes_update -> {face_up_now} codes={cur_codes_wire}")
-                _last_codes = list(cur_codes_wire)
-                # keep periodic cadence in sync to avoid an immediate duplicate
-                _last_obs = face_up_now
-                _same_streak = 0
-        else:
-            # below threshold: do not send codes and do not cache them
-            _last_codes = []
+            # queue remaining (left->right), respecting duplicates
+            remaining = deque()
+            for _, c in hits_for_wire:
+                if remaining_counts[c] > 0:
+                    remaining.append(c)
+                    remaining_counts[c] -= 1
+
+            if remaining:
+                new_det = list(det_codes)
+                for i in range(len(new_det)):
+                    if not remaining:
+                        break
+                    if new_det[i] == "UNK":
+                        new_det[i] = remaining.popleft()
+                if new_det != det_codes:
+                    det_codes = new_det
+                    changed = True
+
+        # ---- if codes changed, push an ordered update (flop->turn->river) and sync cadence ----
+        if changed and face_up_now >= ARM_FACEUP_MIN:
+            ws_tablet.send_cards_detected(face_up_now, codes=list(det_codes))
+            log_event(f"codes_update -> {face_up_now} codes={det_codes}")
+            _last_obs = face_up_now
+            _same_streak = 0
+
+        # ---- pretty codes for dashboard (same detection order) ----
+        cur_codes_pretty = []
+        for c in det_codes:
+            if c == "UNK":
+                cur_codes_pretty.append("UNK")
+            else:
+                rank, suit = c[:-1], c[-1]
+                cur_codes_pretty.append(f"{rank}{SUIT_SYM.get(suit, '?')}")
 
         # ---- annotate/draw ----
         for idx, (label, info, box, panel, warp) in enumerate(cards):
@@ -654,7 +679,7 @@ def main():
                 fn = os.path.join(DEBUG_DIR, f"{ts}_card{idx}_{label}_crm{info['crm']}_re{info['rim_e']}.png")
                 cv2.imwrite(fn, panel)
 
-        # ---- dashboard (shows pretty codes from THIS pass) ----
+        # ---- dashboard ----
         render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up, cur_codes_pretty)
 
         # ---- optional live preview ----
@@ -667,7 +692,6 @@ def main():
 
     cap.release()
     cv2.destroyAllWindows()
-
 
 
 
