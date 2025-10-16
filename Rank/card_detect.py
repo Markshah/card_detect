@@ -584,6 +584,11 @@ def main():
                 return None
             return list(det_codes)
 
+        # >>> EARLY NOTIFY: send immediately if face-up count changed <<<
+        if face_up_now > ARM_FACEUP_MIN and face_up_now  != prev_count:
+            send_cards_change_or_every(face_up_now, codes=_codes_for_tablet())
+        # <<< END EARLY NOTIFY >>>
+
         # ---- state machine: send COUNT immediately ----
         if not armed:
             arm_streak = arm_streak + 1 if face_up_now >= ARM_FACEUP_MIN else 0
@@ -653,12 +658,6 @@ def main():
 
         # ---- pretty codes for dashboard (detection order) ----
         cur_codes_pretty = []
-        for c in det_codes:
-            if c == "UNK":
-                cur_codes_pretty.append("UNK")
-            else:
-                rank, suit = c[:-1], c[-1]
-                cur_codes_pretty.append(f"{rank}{SUIT_SYM.get(suit, '?')}")
 
         # ( #3 ) throttle dashboard redraws
         if frame_idx % DASH_EVERY_N == 0:
@@ -675,6 +674,11 @@ def main():
 
     cap.release()
     cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()
+
+
 
 if __name__ == "__main__":
     main()
