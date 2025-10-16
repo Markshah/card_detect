@@ -83,7 +83,7 @@ RESEND_EVERY=5
 SAVE_FRAME_DIR=./frames
 DEBUG_DUMP_DIR=./debug
 
-CARD_TEMPL_DIR=./card_templates
+CARD_TEMPL_DIR=./templates
 
 RANK_MIN_SCORE=0.40
 SUIT_MIN_SCORE=0.25
@@ -91,6 +91,6 @@ NCC_MARGIN_MIN=0.02
 
 
 # Full-card template matcher
-CARD_FULL_TEMPL_DIR=./card_templates
+CARD_FULL_TEMPL_DIR=./templates
 FULLCARD_MIN_SCORE=0.70
 

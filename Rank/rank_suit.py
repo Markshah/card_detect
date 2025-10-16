@@ -25,7 +25,7 @@ def _code_from_name(name):
 @lru_cache(maxsize=1)
 def _load_templates():
     """Returns list of (code, gray_template) normalized to same size."""
-    templ_dir = os.getenv("CARD_FULL_TEMPL_DIR", "./card_templates")
+    templ_dir = os.getenv("CARD_FULL_TEMPL_DIR", "./templates")
     files = [f for f in os.listdir(templ_dir) if f.lower().endswith((".png",".jpg",".jpeg")) and _code_ok(f)]
     if not files:
         return []

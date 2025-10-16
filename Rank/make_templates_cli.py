@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# make_full_templates_cli.py — label warps into ./card_templates as <RANK><SUIT>.png
+# make_full_templates_cli.py — label warps into ./templates as <RANK><SUIT>.png
 import os, re, cv2
 from pathlib import Path
 
 WARP_DIR = Path("./debug/warps_raw")
-OUT_DIR  = Path("./card_templates")
+OUT_DIR  = Path("./templates")
 SIZE     = (int(os.getenv("WARP_W","400")), int(os.getenv("WARP_H","560")))
 
 OUT_DIR.mkdir(parents=True, exist_ok=True)

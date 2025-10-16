@@ -466,12 +466,12 @@ def main():
     _startup_summary()
     # templates presence warning
     try:
-        full_dir = os.getenv("CARD_FULL_TEMPL_DIR", "./card_templates")
+        full_dir = os.getenv("CARD_FULL_TEMPL_DIR", "./templates")
         files = [f for f in os.listdir(full_dir) if f.lower().endswith((".png",".jpg",".jpeg"))]
         if len(files) < 52:
             log_event(f"WARNING: expected 52 full-card templates in {full_dir} (found {len(files)})")
     except FileNotFoundError:
-        log_event("WARNING: full-card template dir not found — place 52 images in ./card_templates")
+        log_event("WARNING: full-card template dir not found — place 52 images in ./templates")
 
     log_event("loop starting")
 
