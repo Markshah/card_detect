@@ -462,6 +462,7 @@ def send_codes_if_new(count: int, codes):
 
 
 # -------------- main --------------
+
 def main():
     os.makedirs(SAVE_DIR, exist_ok=True)
     os.makedirs(DEBUG_DIR, exist_ok=True)
@@ -500,7 +501,7 @@ def main():
     zero_up_streak = 0
     peak_up = 0
 
-    # --- track last codes we have told the tablet ---
+    # --- track last codes we have sent to the tablet ---
     global _last_codes, _last_obs, _same_streak
     _last_codes = []
 
@@ -565,13 +566,13 @@ def main():
         elif _last_codes:
             _last_codes = _last_codes[:min(len(_last_codes), face_up_now)]
 
-        # ---- state machine: send COUNT immediately, including last-known codes (if any) ----
+        # ---- state machine: send COUNT immediately; include codes only if at/above threshold ----
         if not armed:
             arm_streak = arm_streak + 1 if face_up_now >= ARM_FACEUP_MIN else 0
             if arm_streak >= ARM_CONSEC_N:
                 armed = True
-                # include last-known codes so previously-identified cards don't go "UNK"
-                send_cards_change_or_every(face_up_now, codes=_last_codes if face_up_now > 0 else [])
+                codes_for_now = (_last_codes[:face_up_now] if (face_up_now >= ARM_FACEUP_MIN and _last_codes) else None)
+                send_cards_change_or_every(face_up_now, codes=codes_for_now)
                 zero_up_streak = 0
                 peak_up = face_up_now
                 log_event(f"STATE -> ARMED (need {ARM_FACEUP_MIN}+ for {ARM_CONSEC_N})")
@@ -579,7 +580,7 @@ def main():
             zero_up_streak = zero_up_streak + 1 if face_up_now == 0 else 0
             if zero_up_streak >= ZERO_UP_CONSEC_N:
                 log_event(f"STATE -> RESET (zero-up for {ZERO_UP_CONSEC_N}, peak={peak_up})")
-                send_cards_change_or_every(0, codes=[])  # explicit zero; tablet should clear
+                send_cards_change_or_every(0, codes=[])  # explicit zero
                 send_reset_reliably()
                 armed = False
                 arm_streak = 0
@@ -587,8 +588,8 @@ def main():
                 peak_up = 0
                 _last_codes = []  # clear cache
             else:
-                # count-only cadence, but include last-known codes to avoid flashing UNKs
-                send_cards_change_or_every(face_up_now, codes=_last_codes if face_up_now > 0 else [])
+                codes_for_now = (_last_codes[:face_up_now] if (face_up_now >= ARM_FACEUP_MIN and _last_codes) else None)
+                send_cards_change_or_every(face_up_now, codes=codes_for_now)
 
         # ---- NOW classify codes (LEFT->RIGHT, unique, up to 5) ----
         THRESH = 0.60
@@ -623,8 +624,8 @@ def main():
             seen2.add(c); cur_codes_wire.append(c)
             if len(cur_codes_wire) == 5: break
 
-        # ---- push codes update if the set/order changed; keep cache in sync ----
-        if face_up_now > 0:
+        # ---- push codes update only if at/above threshold and changed; keep cache in sync ----
+        if face_up_now >= ARM_FACEUP_MIN:
             if list(cur_codes_wire) != _last_codes:
                 ws_tablet.send_cards_detected(face_up_now, codes=cur_codes_wire)
                 log_event(f"codes_update -> {face_up_now} codes={cur_codes_wire}")
@@ -632,6 +633,9 @@ def main():
                 # keep periodic cadence in sync to avoid an immediate duplicate
                 _last_obs = face_up_now
                 _same_streak = 0
+        else:
+            # below threshold: do not send codes and do not cache them
+            _last_codes = []
 
         # ---- annotate/draw ----
         for idx, (label, info, box, panel, warp) in enumerate(cards):
