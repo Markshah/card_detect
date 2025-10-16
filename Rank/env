@@ -40,7 +40,7 @@ CARD_LONG_MAX_PX=720
 # --- Arming / Reset Logic ---
 ARM_FACEUP_MIN=3
 ARM_CONSEC_N=1
-ZERO_UP_CONSEC_N=2
+ZERO_UP_CONSEC_N=3
 
 # --- Saving / Debug ---
 SAVE_IMAGES=0

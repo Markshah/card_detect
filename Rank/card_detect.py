@@ -5,6 +5,14 @@ from collections import deque
 from dotenv import load_dotenv
 from pyfiglet import Figlet
 
+# ---- OpenCV perf knobs ( #4 ) ----
+try:
+    cv2.setUseOptimized(True)
+    # 0 lets OpenCV pick; set a small fixed number (e.g., 4) if your CPU likes that better
+    cv2.setNumThreads(0)
+except Exception:
+    pass
+
 # --- recognizer import (flexible: any-rotation if available) ---
 try:
     from rank_suit import classify_fullcard_anyrot as _classify_card  # returns (code, score, rot)
@@ -145,7 +153,6 @@ def log_event(s: str):
     ts = time.strftime("%H:%M:%S")
     events.appendleft(f"{ts}  {s}")
 
-
 def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up, cur_codes):
     import os, sys
     from pyfiglet import Figlet
@@ -216,14 +223,11 @@ def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, 
     if dash_rows > 0 and events:
         print(f"{GRAY}" + "-" * 72 + f"{RESET}")
         print("Recent events:")
-        # show up to dash_rows most-recent entries
         for line in list(events)[:dash_rows]:
             color = GREEN if "ARMED" in line else (YELLOW if "RESET" in line else (RED if "fail" in line.lower() else GRAY))
             print("  " + color + line + RESET)
 
     sys.stdout.flush()
-
-
 
 def _startup_summary():
     t_ok = ws_tablet.wait_connected(2.0)
@@ -339,6 +343,28 @@ def _card_candidates(mask, frame_w, frame_h):
         yield cnt
 
 # -------------- ring-only classifier --------------
+# ( #2 ) Precompute ring/center indices per (shape, params) to avoid recomputing masks every card
+_RING_CACHE = {}
+def _ring_indices(shape, rim_frac, inner_frac):
+    key = (shape, rim_frac, inner_frac)
+    hit = _RING_CACHE.get(key)
+    if hit is not None: return hit
+    h, w = shape
+    rim   = int(max(1, rim_frac   * min(h, w)))
+    inner = int(max(rim+1, inner_frac * min(h, w)))
+    band = np.zeros((h, w), dtype=bool)
+    band[:inner,:]  = True;  band[-inner:,:]  = True
+    band[:, :inner] = True;  band[:, -inner:] = True
+    inner_cut = np.zeros((h, w), dtype=bool)
+    inner_cut[:rim,:]  = True; inner_cut[-rim:,:]  = True
+    inner_cut[:, :rim] = True; inner_cut[:, -rim:] = True
+    ring = band & (~inner_cut)
+    csz = max(10, min(w, h)//5)
+    cx0 = w//2 - csz//2; cy0 = h//2 - csz//2
+    ctr_slice = (slice(cy0, cy0+csz), slice(cx0, cx0+csz))
+    _RING_CACHE[key] = (ring, ctr_slice)
+    return _RING_CACHE[key]
+
 def classify_by_white_rim(warp_bgr, make_panel=True):
     lab = cv2.cvtColor(warp_bgr, cv2.COLOR_BGR2LAB)
     L   = lab[...,0].astype(np.float32)
@@ -346,17 +372,7 @@ def classify_by_white_rim(warp_bgr, make_panel=True):
     b   = lab[...,2].astype(np.float32) - 128.0
     C   = np.hypot(a, b)
 
-    h, w = L.shape
-    rim   = int(max(1, RIM_OUTER_FRAC * min(h, w)))
-    inner = int(max(rim+1, RIM_INNER_FRAC * min(h, w)))
-
-    band = np.zeros_like(L, dtype=bool)
-    band[:inner,:]  = True;  band[-inner:,:]  = True
-    band[:, :inner] = True;  band[:, -inner:] = True
-    inner_cut = np.zeros_like(L, dtype=bool)
-    inner_cut[:rim,:]  = True; inner_cut[-rim:,:]  = True
-    inner_cut[:, :rim] = True; inner_cut[:, -rim:] = True
-    ring = band & (~inner_cut)
+    ring, ctr = _ring_indices(L.shape, RIM_OUTER_FRAC, RIM_INNER_FRAC)
 
     L_ring = L[ring]
     if L_ring.size == 0:
@@ -369,10 +385,7 @@ def classify_by_white_rim(warp_bgr, make_panel=True):
     normL = _normalize_L(L.astype(np.uint8))
     edges = cv2.Canny(normL, DEBUG_EDGE_LOW, DEBUG_EDGE_HIGH)
     rim_edge = float((edges[ring] > 0).mean())
-
-    csz = max(10, min(w, h)//5)
-    cx0 = w//2 - csz//2; cy0 = h//2 - csz//2
-    center_edge = float((edges[cy0:cy0+csz, cx0:cx0+csz] > 0).mean())
+    center_edge = float((edges[ctr] > 0).mean())
 
     stats = {"crm": round(white_frac,3), "rim_e": round(rim_edge,3),
              "center_ed": round(center_edge,3), "L_thr": float(L_thr)}
@@ -380,6 +393,7 @@ def classify_by_white_rim(warp_bgr, make_panel=True):
     label = "face_up" if (white_frac >= FACEUP_WHITE_MIN and rim_edge <= RIM_EDGE_MAX and center_edge <= CENTER_EDGE_MAX) else "face_down"
 
     panel = None
+    # ( #7 ) Avoid building heavy debug panels unless requested
     if (SAVE_WARPS or SAVE_RING_DEBUG) and make_panel:
         overlay = warp_bgr.copy()
         ring_vis = np.zeros_like(overlay)
@@ -399,10 +413,6 @@ _same_streak = 0
 _last_reset_ts = 0.0
 
 def send_cards_change_or_every(count: int, codes=None):
-    """
-    Send immediately when count changes; otherwise every RESEND_EVERY frames.
-    Always includes 'codes' (list of strings like ['QS','10D','4C'] or pretty symbols if preferred).
-    """
     global _last_obs, _same_streak
     count = int(count)
     if _last_obs is None or count != _last_obs:
@@ -439,29 +449,12 @@ def send_reset_reliably():
     else:  log_event("reset FAILED after retries")
     return ok
 
-# Track last codes we told the tablet, so we can push updates even if count is unchanged
-_last_codes = None
-
-def send_codes_if_new(count: int, codes):
-    """
-    If 'codes' changed from last time, immediately notify the tablet with the same 'count'.
-    Keeps periodic sender (_last_obs/_same_streak) in sync to avoid a duplicate right after.
-    """
-    global _last_codes, _last_obs, _same_streak
-    if codes is None:
-        return False
-    if _last_codes is None or list(codes) != _last_codes:
-        ws_tablet.send_cards_detected(count, codes=codes)
-        log_event(f"codes_update -> {count} codes={codes}")
-        _last_codes = list(codes)
-        # keep periodic cadence in sync so we don't double send this frame
-        _last_obs = int(count)
-        _same_streak = 0
-        return True
-    return False
-
-
 # -------------- main --------------
+
+# ( #6 ) move constants out of hot loop
+CLASSIFY_THRESH = 0.60
+DASH_EVERY_N = max(1, int(os.getenv("DASH_EVERY_N", "5")))   # ( #3 ) throttle dashboard redraws
+
 def main():
     os.makedirs(SAVE_DIR, exist_ok=True)
     os.makedirs(DEBUG_DIR, exist_ok=True)
@@ -491,6 +484,13 @@ def main():
         print("[ERROR] camera not found")
         return
 
+    # ( #9 ) lower capture resolution a bit to reduce CPU; adjust to taste
+    try:
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    except Exception:
+        pass
+
     app_start_ts = time.time()
     ws_watchdog_start = app_start_ts
     both_connected_once = False
@@ -508,6 +508,8 @@ def main():
     _last_obs = None
     _same_streak = 0
 
+    frame_idx = 0  # ( #3 ) dashboard throttle counter
+
     while True:
         ts = time.strftime("%Y%m%d-%H%M%S")
         ok, frame = cap.read()
@@ -523,7 +525,8 @@ def main():
             else:
                 if ENFORCE_STARTUP_GRACE and (now - app_start_ts >= STARTUP_GRACE_S):
                     log_event(f"EXIT: startup grace ({int(STARTUP_GRACE_S)}s) expired without both WS up")
-                    render_dashboard(0,0,False,0,0,0, cur_codes=[])
+                    if frame_idx % DASH_EVERY_N == 0:
+                        render_dashboard(0,0,False,0,0,0, cur_codes=[])
                     sys.exit(3)
         else:
             if both_up:
@@ -531,12 +534,15 @@ def main():
             else:
                 if ENFORCE_BOTH_WS and (now - ws_watchdog_start >= BOTH_WS_TIMEOUT_S):
                     log_event(f"EXIT: both WS not up simultaneously for {int(now - ws_watchdog_start)}s")
-                    render_dashboard(0,0,False,0,0,0, cur_codes=[])
+                    if frame_idx % DASH_EVERY_N == 0:
+                        render_dashboard(0,0,False,0,0,0, cur_codes=[])
                     sys.exit(2)
 
         if not ok:
             time.sleep(SLEEP_SEC)
-            render_dashboard(0, 0, armed, arm_streak, zero_up_streak, peak_up, cur_codes=[])
+            if frame_idx % DASH_EVERY_N == 0:
+                render_dashboard(0, 0, armed, arm_streak, zero_up_streak, peak_up, cur_codes=[])
+            frame_idx += 1
             continue
 
         # ---- preprocess & threshold ----
@@ -545,6 +551,7 @@ def main():
         norm = _normalize_L(gray)
         _, th = cv2.threshold(norm, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
+        # ( #7 ) only compute/save extras when requested
         if SAVE_MASKS:
             edges_full = cv2.Canny(norm, DEBUG_EDGE_LOW, DEBUG_EDGE_HIGH)
             cv2.imwrite(os.path.join(SAVE_DIR, f"norm_{ts}.png"), norm)
@@ -564,7 +571,7 @@ def main():
         cards_now   = len(cards)
         peak_up     = max(peak_up, face_up_now)
 
-        # ---- maintain detection-order list length (append UNK on increase; truncate on decrease; clear on zero) ----
+        # maintain detection-order list length
         if face_up_now == 0:
             det_codes = []
         elif face_up_now > prev_count:
@@ -572,13 +579,12 @@ def main():
         elif face_up_now < prev_count:
             det_codes = det_codes[:face_up_now]
 
-        # ---- helper: codes to include with count (only at/above threshold; always detection order) ----
         def _codes_for_tablet():
             if face_up_now < ARM_FACEUP_MIN or face_up_now == 0:
                 return None
-            return list(det_codes)  # same order: flop0, flop1, flop2, turn, river
+            return list(det_codes)
 
-        # ---- state machine: send COUNT immediately (include codes only if at/above threshold) ----
+        # ---- state machine: send COUNT immediately ----
         if not armed:
             arm_streak = arm_streak + 1 if face_up_now >= ARM_FACEUP_MIN else 0
             if arm_streak >= ARM_CONSEC_N:
@@ -602,58 +608,50 @@ def main():
                 send_cards_change_or_every(face_up_now, codes=_codes_for_tablet())
 
         # ---- classify codes (LEFT->RIGHT for this frame), then fill UNKs in detection order ----
-        THRESH = 0.60
-        hits_for_wire = []  # [(x_left, "QS"), ...], left->right per *frame*
+        hits_for_wire = []  # [(x_left, "QS"), ...]
         for (label, _info, box, _panel, warp) in cards:
             if label != "face_up":
                 continue
             out = _classify_card(warp)
             if len(out) == 3: code, score, _rot = out
             else:             code, score = out
-            if not code or score < THRESH:
+            if not code or score < CLASSIFY_THRESH:
                 continue
             x_pos = int(min(box[:,0]))
             hits_for_wire.append((x_pos, code.upper()))
         hits_for_wire.sort(key=lambda t: t[0])
 
-        # ---- merge: fill UNK slots only; never reorder known slots ----
+        # merge into detection order (fill UNKs only)
         changed = False
         if face_up_now >= ARM_FACEUP_MIN and face_up_now > 0 and hits_for_wire:
             from collections import Counter, deque
             seen_now = [c for _, c in hits_for_wire]
             remaining_counts = Counter(seen_now)
-
-            # subtract codes already locked in det_codes
             for c in det_codes:
                 if c != "UNK" and remaining_counts[c] > 0:
                     remaining_counts[c] -= 1
-
-            # queue remaining (left->right), respecting duplicates
             remaining = deque()
             for _, c in hits_for_wire:
                 if remaining_counts[c] > 0:
                     remaining.append(c)
                     remaining_counts[c] -= 1
-
             if remaining:
                 new_det = list(det_codes)
                 for i in range(len(new_det)):
-                    if not remaining:
-                        break
+                    if not remaining: break
                     if new_det[i] == "UNK":
                         new_det[i] = remaining.popleft()
                 if new_det != det_codes:
                     det_codes = new_det
                     changed = True
 
-        # ---- if codes changed, push an ordered update (flop->turn->river) and sync cadence ----
         if changed and face_up_now >= ARM_FACEUP_MIN:
             ws_tablet.send_cards_detected(face_up_now, codes=list(det_codes))
             log_event(f"codes_update -> {face_up_now} codes={det_codes}")
             _last_obs = face_up_now
             _same_streak = 0
 
-        # ---- pretty codes for dashboard (same detection order) ----
+        # ---- pretty codes for dashboard (detection order) ----
         cur_codes_pretty = []
         for c in det_codes:
             if c == "UNK":
@@ -662,25 +660,9 @@ def main():
                 rank, suit = c[:-1], c[-1]
                 cur_codes_pretty.append(f"{rank}{SUIT_SYM.get(suit, '?')}")
 
-        # ---- annotate/draw ----
-        for idx, (label, info, box, panel, warp) in enumerate(cards):
-            color = (0,255,0) if label=="face_up" else (0,0,255)
-            box = box.astype(int)
-            cv2.polylines(frame, [box], True, color, 2)
-            cv2.putText(frame, f"{idx}:{label}", tuple(box[0]), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-            if DRAW_STATS:
-                s = f"crm={info.get('crm',0):.3f} rim_e={info.get('rim_e',0):.3f} c={info.get('center_ed',0):.3f}"
-                cv2.putText(frame, s, (box[0][0], box[0][1]+18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-
-            if SAVE_WARP_RAW:
-                cv2.imwrite(os.path.join(DEBUG_DIR, "warps_raw", f"{ts}_card{idx}.png"), warp)
-
-            if (SAVE_WARPS or SAVE_RING_DEBUG) and panel is not None:
-                fn = os.path.join(DEBUG_DIR, f"{ts}_card{idx}_{label}_crm{info['crm']}_re{info['rim_e']}.png")
-                cv2.imwrite(fn, panel)
-
-        # ---- dashboard ----
-        render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up, cur_codes_pretty)
+        # ( #3 ) throttle dashboard redraws
+        if frame_idx % DASH_EVERY_N == 0:
+            render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up, cur_codes_pretty)
 
         # ---- optional live preview ----
         if SHOW_PREVIEW:
@@ -688,12 +670,11 @@ def main():
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 
+        frame_idx += 1
         time.sleep(SLEEP_SEC)
 
     cap.release()
     cv2.destroyAllWindows()
-
-
 
 if __name__ == "__main__":
     main()
