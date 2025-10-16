@@ -83,16 +83,28 @@ class WSManager:
     def send_cards_detected(self, count, codes=None):
         """
         Send current count and optional list of codes.
-        Example: {"type": "cards_detected", "count": 3, "codes": ["KD","JS"]}
+        Expected by Android:
+          {
+            "command": "cards_detected",
+            "data": {
+                "count": 3,
+                "codes": ["KD","JS"]
+            }
+          }
         """
         try:
-            payload = {"command": "cards_detected", "count": int(count)}
+            data = {"count": int(count)}
             if codes:
-                payload["codes"] = [c.upper() for c in codes if c]
-            self._send_json(payload)
+                data["codes"] = [c.upper() for c in codes if c]
+    
+            payload = {"command": "cards_detected", "data": data}
+    
+            self.send_json(payload)
             return True
-        except Exception:
+        except Exception as e:
+            logging.exception("send_cards_detected failed")
             return False
+
 
     def send_move_dealer_forward(self) -> bool:
         """Send: {"command":"move_dealer_forward"}"""
@@ -172,7 +184,7 @@ class WSManager:
             if self._hb_interval > 0 and self.is_connected:
                 try:
                     # light heartbeat the server can ignore if it wants
-                    self.send_json({"type": "heartbeat", "ts": now})
+                    self.send_json({"command": "heartbeat", "ts": now})
                 except Exception:
                     pass
 
