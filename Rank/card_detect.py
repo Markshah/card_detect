@@ -439,6 +439,28 @@ def send_reset_reliably():
     else:  log_event("reset FAILED after retries")
     return ok
 
+# Track last codes we told the tablet, so we can push updates even if count is unchanged
+_last_codes = None
+
+def send_codes_if_new(count: int, codes):
+    """
+    If 'codes' changed from last time, immediately notify the tablet with the same 'count'.
+    Keeps periodic sender (_last_obs/_same_streak) in sync to avoid a duplicate right after.
+    """
+    global _last_codes, _last_obs, _same_streak
+    if codes is None:
+        return False
+    if _last_codes is None or list(codes) != _last_codes:
+        ws_tablet.send_cards_detected(count, codes=codes)
+        log_event(f"codes_update -> {count} codes={codes}")
+        _last_codes = list(codes)
+        # keep periodic cadence in sync so we don't double send this frame
+        _last_obs = int(count)
+        _same_streak = 0
+        return True
+    return False
+
+
 # -------------- main --------------
 def main():
     os.makedirs(SAVE_DIR, exist_ok=True)
@@ -477,6 +499,10 @@ def main():
     arm_streak = 0
     zero_up_streak = 0
     peak_up = 0
+
+    # --- track last codes we have told the tablet ---
+    global _last_codes, _last_obs, _same_streak
+    _last_codes = []
 
     while True:
         ts = time.strftime("%Y%m%d-%H%M%S")
@@ -521,36 +547,67 @@ def main():
             cv2.imwrite(os.path.join(SAVE_DIR, f"th_{ts}.png"), th)
             cv2.imwrite(os.path.join(SAVE_DIR, f"edges_{ts}.png"), edges_full)
 
-        # detect cards (warp + rim-classify)
+        # ---- detect cards (warp + rim-classify) ----
         cards = []
         for idx, cnt in enumerate(_card_candidates(th, proc.shape[1], proc.shape[0])):
             warp, box, (mw, mh) = _warp_from_contour(proc, cnt)
             label, info, panel = classify_by_white_rim(warp)
             cards.append((label, info, box, panel, warp))
 
-        # --- collect current codes (LEFT->RIGHT, unique, up to 5) BEFORE state machine sends ---
-        # We do minimal classification for codes here; drawing/annotating happens below.
-        THRESH = 0.60
-        hits_for_codes = []  # list of (x_pos, "Q♠") for display; and ("QS") for codes to tablet
-        hits_for_wire = []   # list of (x_pos, "QS") wire-format to send to Android
+        # ---- compute counts FIRST ----
+        face_up_now = sum(1 for c in cards if c[0] == "face_up")
+        cards_now   = len(cards)
+        peak_up     = max(peak_up, face_up_now)
 
+        # Maintain / trim last-known codes based on current count
+        if face_up_now == 0:
+            _last_codes = []
+        elif _last_codes:
+            _last_codes = _last_codes[:min(len(_last_codes), face_up_now)]
+
+        # ---- state machine: send COUNT immediately, including last-known codes (if any) ----
+        if not armed:
+            arm_streak = arm_streak + 1 if face_up_now >= ARM_FACEUP_MIN else 0
+            if arm_streak >= ARM_CONSEC_N:
+                armed = True
+                # include last-known codes so previously-identified cards don't go "UNK"
+                send_cards_change_or_every(face_up_now, codes=_last_codes if face_up_now > 0 else [])
+                zero_up_streak = 0
+                peak_up = face_up_now
+                log_event(f"STATE -> ARMED (need {ARM_FACEUP_MIN}+ for {ARM_CONSEC_N})")
+        else:
+            zero_up_streak = zero_up_streak + 1 if face_up_now == 0 else 0
+            if zero_up_streak >= ZERO_UP_CONSEC_N:
+                log_event(f"STATE -> RESET (zero-up for {ZERO_UP_CONSEC_N}, peak={peak_up})")
+                send_cards_change_or_every(0, codes=[])  # explicit zero; tablet should clear
+                send_reset_reliably()
+                armed = False
+                arm_streak = 0
+                zero_up_streak = 0
+                peak_up = 0
+                _last_codes = []  # clear cache
+            else:
+                # count-only cadence, but include last-known codes to avoid flashing UNKs
+                send_cards_change_or_every(face_up_now, codes=_last_codes if face_up_now > 0 else [])
+
+        # ---- NOW classify codes (LEFT->RIGHT, unique, up to 5) ----
+        THRESH = 0.60
+        hits_for_codes = []
+        hits_for_wire  = []
         for (label, _info, box, _panel, warp) in cards:
             if label != "face_up":
                 continue
             out = _classify_card(warp)
             if len(out) == 3: code, score, _rot = out
             else:             code, score = out
-            if not code: 
-                continue
-            if score < THRESH:
+            if not code or score < THRESH:
                 continue
             rank, suit = code[:-1], code[-1]
             pretty = f"{rank}{SUIT_SYM.get(suit, '?')}"
-            x_pos = int(min(box[:,0]))  # leftmost x
+            x_pos = int(min(box[:,0]))  # leftmost x for ordering
             hits_for_codes.append((x_pos, pretty))
             hits_for_wire.append((x_pos, code.upper()))
 
-        # Build de-duped, ordered lists (up to 5)
         hits_for_codes.sort(key=lambda t: t[0])
         hits_for_wire.sort(key=lambda t: t[0])
 
@@ -566,34 +623,17 @@ def main():
             seen2.add(c); cur_codes_wire.append(c)
             if len(cur_codes_wire) == 5: break
 
-        # Tally counts
-        face_up_now = sum(1 for c in cards if c[0] == "face_up")
-        cards_now   = len(cards)
-        peak_up     = max(peak_up, face_up_now)
+        # ---- push codes update if the set/order changed; keep cache in sync ----
+        if face_up_now > 0:
+            if list(cur_codes_wire) != _last_codes:
+                ws_tablet.send_cards_detected(face_up_now, codes=cur_codes_wire)
+                log_event(f"codes_update -> {face_up_now} codes={cur_codes_wire}")
+                _last_codes = list(cur_codes_wire)
+                # keep periodic cadence in sync to avoid an immediate duplicate
+                _last_obs = face_up_now
+                _same_streak = 0
 
-        # --- arming/reset state machine (now sends count + codes) ---
-        if not armed:
-            arm_streak = arm_streak + 1 if face_up_now >= ARM_FACEUP_MIN else 0
-            if arm_streak >= ARM_CONSEC_N:
-                armed = True
-                send_cards_change_or_every(face_up_now, codes=cur_codes_wire)
-                zero_up_streak = 0
-                peak_up = face_up_now
-                log_event(f"STATE -> ARMED (need {ARM_FACEUP_MIN}+ for {ARM_CONSEC_N})")
-        else:
-            zero_up_streak = zero_up_streak + 1 if face_up_now == 0 else 0
-            if zero_up_streak >= ZERO_UP_CONSEC_N:
-                log_event(f"STATE -> RESET (zero-up for {ZERO_UP_CONSEC_N}, peak={peak_up})")
-                send_cards_change_or_every(0, codes=[])  # send zero with empty codes
-                send_reset_reliably()
-                armed = False
-                arm_streak = 0
-                zero_up_streak = 0
-                peak_up = 0
-            else:
-                send_cards_change_or_every(face_up_now, codes=cur_codes_wire)
-
-        # ---- annotate/draw & optional saves (also shows pretty codes) ----
+        # ---- annotate/draw ----
         for idx, (label, info, box, panel, warp) in enumerate(cards):
             color = (0,255,0) if label=="face_up" else (0,0,255)
             box = box.astype(int)
@@ -603,17 +643,17 @@ def main():
                 s = f"crm={info.get('crm',0):.3f} rim_e={info.get('rim_e',0):.3f} c={info.get('center_ed',0):.3f}"
                 cv2.putText(frame, s, (box[0][0], box[0][1]+18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
-            if int(os.getenv("SAVE_WARP_RAW","0")):
+            if SAVE_WARP_RAW:
                 cv2.imwrite(os.path.join(DEBUG_DIR, "warps_raw", f"{ts}_card{idx}.png"), warp)
 
             if (SAVE_WARPS or SAVE_RING_DEBUG) and panel is not None:
                 fn = os.path.join(DEBUG_DIR, f"{ts}_card{idx}_{label}_crm{info['crm']}_re{info['rim_e']}.png")
                 cv2.imwrite(fn, panel)
 
-        # dashboard
+        # ---- dashboard (shows pretty codes from THIS pass) ----
         render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up, cur_codes_pretty)
 
-        # preview window (optional)
+        # ---- optional live preview ----
         if SHOW_PREVIEW:
             cv2.imshow("Card Detector", frame)
             if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -623,6 +663,9 @@ def main():
 
     cap.release()
     cv2.destroyAllWindows()
+
+
+
 
 if __name__ == "__main__":
     main()
