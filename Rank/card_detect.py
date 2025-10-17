@@ -452,7 +452,7 @@ def send_reset_reliably():
 # -------------- main --------------
 
 # ( #6 ) move constants out of hot loop
-CLASSIFY_THRESH = 0.60
+CLASSIFY_THRESH = 0.55
 DASH_EVERY_N = max(1, int(os.getenv("DASH_EVERY_N", "5")))   # ( #3 ) throttle dashboard redraws
 
 def main():

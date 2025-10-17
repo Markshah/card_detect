@@ -1,6 +1,6 @@
 # --- Camera & Loop ---
 CAMERA_INDEX=0
-SLEEP_SEC=0.2
+SLEEP_SEC=0.1
 ROI="0,0,0,0"
 
 # --- Rim Classifier thresholds ---
