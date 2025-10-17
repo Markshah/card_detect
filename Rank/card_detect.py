@@ -652,7 +652,7 @@ def main():
 
         if changed and face_up_now >= ARM_FACEUP_MIN:
             ws_tablet.send_cards_detected(face_up_now, codes=list(det_codes))
-            log_event(f"codes_update -> {face_up_now} codes={det_codes}")
+            log_event(f"codes_update -> {face_up_now}")
             _last_obs = face_up_now
             _same_streak = 0
 
@@ -675,8 +675,6 @@ def main():
     cap.release()
     cv2.destroyAllWindows()
 
-if __name__ == "__main__":
-    main()
 
 
 
