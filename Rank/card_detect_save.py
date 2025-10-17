@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # card_detect.py — face-up/down by white rim + arming/reset + dual-WS sends + dashboard
 import os, sys, cv2, time, atexit, numpy as np, logging
-from collections import deque
+from collections import deque, OrderedDict
 from dotenv import load_dotenv
 from pyfiglet import Figlet
+import hashlib
+
 
 # ---- OpenCV perf knobs ( #4 ) ----
 try:
@@ -53,6 +55,13 @@ QUIET_LOGS = _b("QUIET_LOGS", "1")
 # number of recent events
 DASH_ROWS  = int(os.getenv("DASH_ROWS", "6"))
 SHOW_PREVIEW = int(os.getenv("SHOW_PREVIEW", "0"))
+
+# Also include a tiny warp digest in the key for uniqueness
+XHASH_USE_WARP   = int(os.getenv("XHASH_USE_WARP", "1"))   # 1=use warp digest in key
+WARP_HASH_DIMS   = tuple(int(x) for x in os.getenv("WARP_HASH_DIMS", "40,56").split(","))  # (w,h) small
+WARP_HASH_QUANT  = int(os.getenv("WARP_HASH_QUANT", "16")) # 8/16/32 -> quantize grayscale before hashing
+WARP_HASH_BYTES  = int(os.getenv("WARP_HASH_BYTES", "8"))  # digest size in bytes (6–12 is fine)
+
 
 # ---- camera / I/O ----
 CAMERA_INDEX = int(os.getenv("CAMERA_INDEX", "0"))
@@ -149,12 +158,11 @@ atexit.register(lambda: (ws_tablet.stop(), ws_arduino.stop()))
 
 # ---------------- dashboard helpers ----------------
 events = deque(maxlen=DASH_ROWS)
-
 def log_event(s: str):
     ts = time.strftime("%H:%M:%S")
     events.appendleft(f"{ts}  {s}")
 
-def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up):
+def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up, cur_codes):
     import os, sys
     from pyfiglet import Figlet
 
@@ -176,6 +184,17 @@ def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, 
     a_color = GREEN if a_ok else RED
     print(f"{BOLD}Tablet : {t_color}{TABLET_WS_URL}{RESET}   [{t_color}{'UP' if t_ok else 'DOWN'}{RESET}]")
     print(f"{BOLD}Arduino: {a_color}{ARDUINO_WS_URL}{RESET}   [{a_color}{'UP' if a_ok else 'DOWN'}{RESET}]")
+
+    # --- Current recognized codes (pretty), up to 5 ---
+    pretty_codes = "  ".join(cur_codes[:5]) if cur_codes else ""
+    if DASH_BIGTEXT and pretty_codes:
+        ascii_line = "".join(INV_SYM.get(ch, ch) for ch in pretty_codes)  # QS 10D 4C
+        f2 = Figlet(font="big")
+        for line in f2.renderText(ascii_line).rstrip().splitlines():
+            print(GREEN + line + RESET)
+        print(f"{BOLD}{YELLOW}{pretty_codes}{RESET}\n")
+    elif pretty_codes:
+        print(f"{BOLD}Codes:{RESET} {GREEN}{pretty_codes}{RESET}")
 
     # --- UP : DOWN summary ---
     down_now = max(0, cards_now - face_up_now)
@@ -243,7 +262,7 @@ def run_simulator():
         log_event(f"[SIM] cards_detected -> {val}")
         render_dashboard(face_up_now=val, cards_now=val, armed=False,
                          arm_streak=arm_streak, zero_up_streak=zero_up_streak,
-                         peak_up=peak_up)
+                         peak_up=peak_up, cur_codes=[])
         time.sleep(SIM_INTERVAL_SEC)
         idx += 1
 
@@ -410,7 +429,6 @@ def send_cards_change_or_every(count: int, codes=None):
         ws_tablet.send_cards_detected(count, codes=codes)
         log_event(f"cards_detected -> {count} (changed) codes={codes or []}")
         return True
-
     _same_streak += 1
     if _same_streak >= RESEND_EVERY:
         _same_streak = 0
@@ -440,10 +458,91 @@ def send_reset_reliably():
     else:  log_event("reset FAILED after retries")
     return ok
 
+# -------------- x-hash cache (position-based; NEW) --------------
+# Env knobs (kept simple; defaults should work well)
+XHASH_ENABLE      = int(os.getenv("XHASH_ENABLE", "1"))
+XHASH_BIN_PX      = int(os.getenv("XHASH_BIN_PX", "16"))     # quantize coords to absorb jitter
+XHASH_USE_Y       = int(os.getenv("XHASH_USE_Y", "0"))       # include Y in key (usually not needed)
+XHASH_USE_SIZE    = int(os.getenv("XHASH_USE_SIZE", "0"))    # include (w,h) in key
+XHASH_TTL_S       = float(os.getenv("XHASH_TTL_S", "5.0"))   # expire entries
+XHASH_CACHE_SIZE  = int(os.getenv("XHASH_CACHE_SIZE", "512"))
+
+_XHASH_CACHE = OrderedDict()
+
+
+def _xhash_clear():
+    _XHASH_CACHE.clear()
+
+
+def _warp_digest(warp_bgr):
+    """
+    Cheap, stable digest of the warp:
+      BGR -> gray -> resize small -> normalize -> quantize -> blake2b
+    """
+    gw, gh = WARP_HASH_DIMS
+    g = cv2.cvtColor(warp_bgr, cv2.COLOR_BGR2GRAY)
+    sm = cv2.resize(g, (gw, gh), interpolation=cv2.INTER_AREA)
+    sm = _normalize_L(sm)
+    q  = max(1, WARP_HASH_QUANT)
+    sm = (sm // q).astype(np.uint8)   # coarse quantization to dampen tiny exposure jitter
+    return hashlib.blake2b(sm.tobytes(), digest_size=WARP_HASH_BYTES).hexdigest()
+
+
+def _xhash_from_box(box, warp=None):
+    """Stable key: quantized x (+ optional y/size) + optional warp digest for uniqueness."""
+    b = max(1, XHASH_BIN_PX)
+    xs = box[:, 0]
+    ys = box[:, 1]
+    x_left  = int(xs.min())
+    x_right = int(xs.max())
+    y_top   = int(ys.min())
+    y_bot   = int(ys.max())
+    w = max(1, x_right - x_left)
+    h = max(1, y_bot - y_top)
+
+    parts = [x_left // b]
+    if XHASH_USE_Y:    parts.append(y_top // b)
+    if XHASH_USE_SIZE: parts.extend([w // b, h // b])
+
+    # optional warp “fingerprint” to avoid collisions when positions are similar
+    if XHASH_USE_WARP and warp is not None:
+        parts.append(_warp_digest(warp))  # short hex string
+
+    return tuple(parts)
+
+
+def _xhash_get(box, warp=None):
+    if not XHASH_ENABLE: return None
+    k = _xhash_from_box(box, warp)
+    item = _XHASH_CACHE.get(k)
+    if item is None: return None
+    ts, val = item
+    _XHASH_CACHE.move_to_end(k, last=True)
+    _XHASH_CACHE[k] = (time.time(), val)
+    return val  # (code, score[, rot])
+
+def _xhash_put(box, warp, result_tuple):
+    if not XHASH_ENABLE: return
+    k = _xhash_from_box(box, warp)
+    _XHASH_CACHE[k] = (time.time(), result_tuple)
+    _XHASH_CACHE.move_to_end(k, last=True)
+    _xhash_prune()
+
+
+def _xhash_prune(now=None):
+    if not XHASH_ENABLE: return
+    if now is None: now = time.time()
+    if XHASH_TTL_S > 0:
+        stale = [k for k,(ts,_v) in _XHASH_CACHE.items() if now - ts > XHASH_TTL_S]
+        for k in stale:
+            _XHASH_CACHE.pop(k, None)
+    while len(_XHASH_CACHE) > XHASH_CACHE_SIZE:
+        _XHASH_CACHE.popitem(last=False)
+
 # -------------- main --------------
 
 # ( #6 ) move constants out of hot loop
-CLASSIFY_THRESH = 0.60
+CLASSIFY_THRESH = 0.55
 DASH_EVERY_N = max(1, int(os.getenv("DASH_EVERY_N", "5")))   # ( #3 ) throttle dashboard redraws
 
 def main():
@@ -517,7 +616,7 @@ def main():
                 if ENFORCE_STARTUP_GRACE and (now - app_start_ts >= STARTUP_GRACE_S):
                     log_event(f"EXIT: startup grace ({int(STARTUP_GRACE_S)}s) expired without both WS up")
                     if frame_idx % DASH_EVERY_N == 0:
-                        render_dashboard(0,0,False,0,0,0)
+                        render_dashboard(0,0,False,0,0,0, cur_codes=[])
                     sys.exit(3)
         else:
             if both_up:
@@ -526,13 +625,13 @@ def main():
                 if ENFORCE_BOTH_WS and (now - ws_watchdog_start >= BOTH_WS_TIMEOUT_S):
                     log_event(f"EXIT: both WS not up simultaneously for {int(now - ws_watchdog_start)}s")
                     if frame_idx % DASH_EVERY_N == 0:
-                        render_dashboard(0,0,False,0,0,0)
+                        render_dashboard(0,0,False,0,0,0, cur_codes=[])
                     sys.exit(2)
 
         if not ok:
             time.sleep(SLEEP_SEC)
             if frame_idx % DASH_EVERY_N == 0:
-                render_dashboard(0, 0, armed, arm_streak, zero_up_streak, peak_up)
+                render_dashboard(0, 0, armed, arm_streak, zero_up_streak, peak_up, cur_codes=[])
             frame_idx += 1
             continue
 
@@ -570,30 +669,15 @@ def main():
         elif face_up_now < prev_count:
             det_codes = det_codes[:face_up_now]
 
-        if SAVE_IMAGES:
-            cv2.imwrite(os.path.join(SAVE_DIR, f"frame_{ts}.jpg"), frame)
-
-        if SAVE_GRAYSCALE:
-            gray_vis = cv2.cvtColor(norm, cv2.COLOR_GRAY2BGR)
-            for idx, (label, info, box, panel, warp) in enumerate(cards):
-                color = (0,255,0) if label=="face_up" else (0,0,255)
-                box_g = (box - np.array([[offx,offy]], dtype=np.float32)).astype(int)
-                cv2.polylines(gray_vis, [box_g], True, color, 2)
-                cv2.putText(gray_vis, f"{idx}:{label}", tuple(box_g[0]),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-                if DRAW_STATS:
-                    s = f"crm={info.get('crm',0):.3f} rim_e={info.get('rim_e',0):.3f} c={info.get('center_ed',0):.3f}"
-                    cv2.putText(gray_vis, s, (box_g[0][0], box_g[0][1]+18),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-            cv2.imwrite(os.path.join(SAVE_DIR, f"gray_{ts}.jpg"), gray_vis)
-
         def _codes_for_tablet():
             if face_up_now < ARM_FACEUP_MIN or face_up_now == 0:
                 return None
             return list(det_codes)
 
+        # >>> EARLY NOTIFY: send immediately if face-up count changed <<<
         if face_up_now > ARM_FACEUP_MIN and face_up_now  != prev_count:
             send_cards_change_or_every(face_up_now, codes=_codes_for_tablet())
+        # <<< END EARLY NOTIFY >>>
 
         # ---- state machine: send COUNT immediately ----
         if not armed:
@@ -615,6 +699,7 @@ def main():
                 zero_up_streak = 0
                 peak_up = 0
                 det_codes = []
+                _xhash_clear()
             else:
                 send_cards_change_or_every(face_up_now, codes=_codes_for_tablet())
 
@@ -623,7 +708,12 @@ def main():
         for (label, _info, box, _panel, warp) in cards:
             if label != "face_up":
                 continue
-            out = _classify_card(warp)
+            # === NEW: try x-hash cache first to skip re-classifying stable cards ===
+            out = _xhash_get(box, warp)
+            if out is None:
+                out = _classify_card(warp)
+                _xhash_put(box, warp, out)
+            # ======================================================================
             if len(out) == 3: code, score, _rot = out
             else:             code, score = out
             if not code or score < CLASSIFY_THRESH:
@@ -667,13 +757,16 @@ def main():
 
         # ( #3 ) throttle dashboard redraws
         if frame_idx % DASH_EVERY_N == 0:
-            render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up)
+            render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up, cur_codes_pretty)
 
         # ---- optional live preview ----
         if SHOW_PREVIEW:
             cv2.imshow("Card Detector", frame)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
+
+        # NEW: keep x-hash cache fresh each frame
+        _xhash_prune()
 
         frame_idx += 1
         time.sleep(SLEEP_SEC)

@@ -1,6 +1,6 @@
 # --- Camera & Loop ---
 CAMERA_INDEX=0
-SLEEP_SEC=0.1
+SLEEP_SEC=0.5
 ROI="0,0,0,0"
 
 # --- Rim Classifier thresholds ---
@@ -23,7 +23,7 @@ BOTH_WS_TIMEOUT_SEC=600    # 10 minutes after both have connected once
 # --- Candidate size/shape gates ---
 CARD_AABB_MIN_FRAC=0.0018
 CARD_AABB_MAX_FRAC=0.30
-CARD_SHORTSIDE_MIN=90
+CARD_SHORTSIDE_MIN=85
 ASPECT_MIN=1.25
 ASPECT_MAX=1.75
 SOLIDITY_MIN=0.88
@@ -39,7 +39,7 @@ CARD_LONG_MAX_PX=720
 
 # --- Arming / Reset Logic ---
 ARM_FACEUP_MIN=3
-ARM_CONSEC_N=1
+ARM_CONSEC_N=2
 ZERO_UP_CONSEC_N=3
 
 # --- Saving / Debug ---
@@ -53,7 +53,7 @@ DEBUG_EDGE_HIGH=90
 SAVE_RING_DEBUG=0         # force saving ring panels for each detected card
 LOG_REJECTIONS=0          # print reject reasons (area/aspect/px/etc.)
 DRAW_LABEL_STATS=1
-DASH_ROWS=3               # number of recent events
+DASH_ROWS=20               # number of recent events
 QUIET_LOGS=1
 DASH_BIGTEXT=0          # (new) skip heavy Figlet banners
 DRAW_OVERLAYS=0         # (new) don't draw boxes/labels on the frame
