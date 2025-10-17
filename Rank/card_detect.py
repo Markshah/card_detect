@@ -620,6 +620,7 @@ def main():
 
         # ---- classify codes (LEFT->RIGHT for this frame), then fill UNKs in detection order ----
         hits_for_wire = []  # [(x_left, "QS"), ...]
+        log_event("1")
         for (label, _info, box, _panel, warp) in cards:
             if label != "face_up":
                 continue
@@ -631,6 +632,7 @@ def main():
             x_pos = int(min(box[:,0]))
             hits_for_wire.append((x_pos, code.upper()))
         hits_for_wire.sort(key=lambda t: t[0])
+        log_event("2")
 
         # merge into detection order (fill UNKs only)
         changed = False
@@ -680,7 +682,6 @@ def main():
 
     cap.release()
     cv2.destroyAllWindows()
-
 
 
 

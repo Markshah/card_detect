@@ -1,6 +1,6 @@
 # --- Camera & Loop ---
 CAMERA_INDEX=0
-SLEEP_SEC=0.5
+SLEEP_SEC=0.1
 ROI="0,0,0,0"
 
 # --- Rim Classifier thresholds ---
@@ -39,7 +39,7 @@ CARD_LONG_MAX_PX=720
 
 # --- Arming / Reset Logic ---
 ARM_FACEUP_MIN=3
-ARM_CONSEC_N=2
+ARM_CONSEC_N=1
 ZERO_UP_CONSEC_N=3
 
 # --- Saving / Debug ---
