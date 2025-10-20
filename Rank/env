@@ -94,3 +94,6 @@ NCC_MARGIN_MIN=0.02
 CARD_FULL_TEMPL_DIR=./templates
 FULLCARD_MIN_SCORE=0.70
 
+TEST_FILES="test_frames/frame1.jpg,test_frames/frame2.jpg,test_frames/frame3.jpg"
+TEST_INTERVAL_SEC=5
+TEST_ENABLE=0
