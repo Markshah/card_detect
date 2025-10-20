@@ -8,6 +8,7 @@ import os, sys, cv2, time, atexit, numpy as np, logging, hashlib, threading, que
 from collections import deque
 from dotenv import load_dotenv
 from pyfiglet import Figlet
+from rank_suit_parallel import classify_fullcard_anyrot as _classify_card  # returns (code, score, rot)
 
 # ---- OpenCV perf knobs ( #4 ) ----
 try:
@@ -17,14 +18,6 @@ try:
 except Exception:
     pass
 
-# --- recognizer import (flexible: any-rotation if available) ---
-try:
-    from rank_suit import classify_fullcard_anyrot as _classify_card  # returns (code, score, rot)
-except ImportError:
-    from rank_suit import classify_fullcard as _classify_card         # returns (code, score)
-
-SUIT_SYM = {"S":"♠","H":"♥","D":"♦","C":"♣"}
-INV_SYM  = {"♠":"S","♥":"H","♦":"D","♣":"C"}  # for ASCII figlet
 
 # ---------------- env ----------------
 if os.path.exists("env"): load_dotenv("env")

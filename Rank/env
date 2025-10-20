@@ -96,4 +96,6 @@ FULLCARD_MIN_SCORE=0.70
 
 TEST_FILES="test_frames/frame1.jpg,test_frames/frame2.jpg,test_frames/frame3.jpg"
 TEST_INTERVAL_SEC=5
+
+# uses local jpg instead of camera
 TEST_ENABLE=0
