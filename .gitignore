@@ -3,6 +3,14 @@
 __pycache__/
 *.pyc
 
+venv/
+lib/
+bin/
+include/
+lib/
+pyvenv.cfg
+
+
 # os junk
 .DS_Store
 
