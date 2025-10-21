@@ -593,6 +593,7 @@ def main():
     arm_streak = 0
     zero_up_streak = 0
     peak_up = 0
+    init_card_detect_sent = False
 
     global _last_obs, _same_streak
     _last_obs = None; _same_streak = 0
@@ -637,6 +638,11 @@ def main():
                 render_dashboard(0, 0, armed, arm_streak, zero_up_streak, peak_up, cur_codes=[])
             frame_idx += 1
             continue
+
+        if not init_card_detect_sent:
+            ws_tablet.send_cards_detected(0, codes=[])
+            init_card_detect_sent = True
+            log_event("init card detect sent")
 
         # ---- preprocess ----
         proc, offx, offy = _roi(frame, ROI) if sum(ROI) != 0 else (frame, 0, 0)
