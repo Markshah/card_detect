@@ -7,7 +7,7 @@ import os, sys, cv2, time, atexit, numpy as np, logging, hashlib, threading, que
 from collections import deque
 from dotenv import load_dotenv
 from pyfiglet import Figlet
-from rank_suit_parallel import classify_fullcard_anyrot as _classify_card  # returns (code, score, rot)
+from rank_suit import classify_fullcard_anyrot as _classify_card  # returns (code, score, rot)
 
 # ---- OpenCV perf knobs ----
 try:
