@@ -5,8 +5,14 @@ ROI="0,0,0,0"
 
 # --- Arming / Reset Logic ---
 ARM_FACEUP_MIN=3
-ARM_CONSEC_N=2
+ARM_SEC_N=1.0
 ZERO_UP_SEC=1.5
+
+# Optional burst/retry knobs for Arduino reset
+WS_SEND_RETRIES=20
+WS_RETRY_DELAY_MS=500
+WS_AWAIT_CONNECT_SEC=1.5
+RESET_DEBOUNCE_SEC=5.0
 
 # --- Saving / Debug ---
 SAVE_IMAGES=0
@@ -66,12 +72,6 @@ USE_GRAYSCALE_ONLY=1
 # --- WebSockets (dual destinations) ---
 TABLET_WS_URL=ws://192.168.1.246:8765
 ARDUINO_WS_URL=ws://192.168.1.245:8888
-
-# Optional burst/retry knobs for Arduino reset
-WS_SEND_RETRIES=10
-WS_RETRY_DELAY_MS=500
-WS_AWAIT_CONNECT_SEC=1.5
-RESET_DEBOUNCE_SEC=5.0
 
 # Resend policy
 RESEND_EVERY=5
