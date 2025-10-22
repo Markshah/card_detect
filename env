@@ -3,6 +3,27 @@ CAMERA_INDEX=0
 SLEEP_SEC=0.1
 ROI="0,0,0,0"
 
+# --- Arming / Reset Logic ---
+ARM_FACEUP_MIN=3
+ARM_CONSEC_N=1
+ZERO_UP_CONSEC_N=6
+
+# --- Saving / Debug ---
+SAVE_IMAGES=0
+SAVE_WARPS=0
+SAVE_GRAYSCALE=0          # save gray with detection overlays
+SAVE_MASKS=0              # save norm/otsu/edges per frame
+SAVE_WARP_RAW=0
+DEBUG_EDGE_LOW=30
+DEBUG_EDGE_HIGH=90
+SAVE_RING_DEBUG=0         # force saving ring panels for each detected card
+LOG_REJECTIONS=0          # print reject reasons (area/aspect/px/etc.)
+DRAW_LABEL_STATS=1
+DASH_ROWS=20               # number of recent events
+QUIET_LOGS=1
+DASH_BIGTEXT=0          # (new) skip heavy Figlet banners
+DRAW_OVERLAYS=0         # (new) don't draw boxes/labels on the frame
+
 # --- Rim Classifier thresholds ---
 FACEUP_WHITE_MIN=0.20
 RIM_EDGE_MAX=0.09
@@ -18,7 +39,6 @@ STARTUP_GRACE_SEC=3600     # 60 minutes
 
 ENFORCE_BOTH_WS=1
 BOTH_WS_TIMEOUT_SEC=600    # 10 minutes after both have connected once
-
 
 # --- Candidate size/shape gates ---
 CARD_AABB_MIN_FRAC=0.0018
@@ -36,27 +56,6 @@ CARD_SHORT_MIN_PX=100    # used only if USE_ABS_PX_GUARDS=1
 CARD_SHORT_MAX_PX=420
 CARD_LONG_MIN_PX=160
 CARD_LONG_MAX_PX=720
-
-# --- Arming / Reset Logic ---
-ARM_FACEUP_MIN=3
-ARM_CONSEC_N=1
-ZERO_UP_CONSEC_N=3
-
-# --- Saving / Debug ---
-SAVE_IMAGES=0
-SAVE_WARPS=0
-SAVE_GRAYSCALE=0          # save gray with detection overlays
-SAVE_MASKS=0              # save norm/otsu/edges per frame
-SAVE_WARP_RAW=0
-DEBUG_EDGE_LOW=30
-DEBUG_EDGE_HIGH=90
-SAVE_RING_DEBUG=0         # force saving ring panels for each detected card
-LOG_REJECTIONS=0          # print reject reasons (area/aspect/px/etc.)
-DRAW_LABEL_STATS=1
-DASH_ROWS=20               # number of recent events
-QUIET_LOGS=1
-DASH_BIGTEXT=0          # (new) skip heavy Figlet banners
-DRAW_OVERLAYS=0         # (new) don't draw boxes/labels on the frame
 
 WARP_W=400
 WARP_H=560
