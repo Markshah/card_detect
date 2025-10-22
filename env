@@ -6,7 +6,7 @@ ROI="0,0,0,0"
 # --- Arming / Reset Logic ---
 ARM_FACEUP_MIN=3
 ARM_CONSEC_N=2
-ZERO_UP_CONSEC_N=4
+ZERO_UP_SEC=1.5
 
 # --- Saving / Debug ---
 SAVE_IMAGES=0

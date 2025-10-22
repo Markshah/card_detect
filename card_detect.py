@@ -110,7 +110,8 @@ ADAPT_SLOP_L = 90
 # ---- arming / reset policy ----
 ARM_CONSEC_N       = int(os.getenv("ARM_CONSEC_N", "3"))
 ARM_FACEUP_MIN     = int(os.getenv("ARM_FACEUP_MIN", "2"))
-ZERO_UP_CONSEC_N   = int(os.getenv("ZERO_UP_CONSEC_N", "3"))
+ZERO_UP_SEC        = float(os.getenv("ZERO_UP_SEC", "2.0"))
+
 
 # ---- slot forget/TTL (NEW) ----
 # If a slot hasn't been seen for this many frames, free it so counts can drop.
@@ -151,10 +152,13 @@ events = deque(maxlen=DASH_ROWS)
 def log_event(s: str):
     ts = time.strftime("%H:%M:%S"); events.appendleft(f"{ts}  {s}")
 
-def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up, cur_codes):
+def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_elapsed_sec, peak_up, cur_codes):
+    import os, sys
     sys.stdout.write("\033[2J\033[H")
+
     DASH_BIGTEXT = int(os.getenv("DASH_BIGTEXT","0"))
     dash_rows    = int(os.getenv("DASH_ROWS","5"))
+    zero_up_sec_target = float(os.getenv("ZERO_UP_SEC", "2.0"))  # for display only
 
     print(f"{BOLD}\033[34m=== WED NIGHT POKER — CARD DETECTOR ==={RESET}")
     t_ok = ws_tablet.is_connected; a_ok = ws_arduino.is_connected
@@ -176,10 +180,16 @@ def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, 
     print(f"{BOLD}{YELLOW}UP{RESET}:{GREEN}{face_up_now}{RESET}  "
           f"{YELLOW}DOWN{RESET}:{RED}{down_now}{RESET}\n")
 
-    state_txt = f"{GREEN}ARMED{RESET}" if armed else (f"{YELLOW}RESET{RESET}" if zero_up_streak >= ZERO_UP_CONSEC_N else f"{YELLOW}IDLE{RESET}")
+    # State text (seconds-based zero-up when armed)
+    if armed:
+        nearing = (zero_up_sec_target > 0 and zero_elapsed_sec >= zero_up_sec_target)
+        state_txt = f"{YELLOW}RESET{RESET}" if nearing else f"{GREEN}ARMED{RESET}"
+    else:
+        state_txt = f"{YELLOW}IDLE{RESET}"
+
     print(f"{BOLD}[LIVE]{RESET} Cards={YELLOW}{cards_now}{RESET}  "
           f"State={state_txt}  Arm={arm_streak}/{ARM_CONSEC_N}  "
-          f"Zero={zero_up_streak}/{ZERO_UP_CONSEC_N}  Peak={peak_up}")
+          f"Zero={zero_elapsed_sec:.1f}/{zero_up_sec_target:.1f}s  Peak={peak_up}")
 
     if dash_rows > 0 and events:
         print(f"{GRAY}" + "-" * 72 + f"{RESET}")
@@ -189,6 +199,8 @@ def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, 
             print("  " + color + line + RESET)
     sys.stdout.flush()
 
+
+
 def _startup_summary():
     t_ok = ws_tablet.wait_connected(2.0); a_ok = ws_arduino.wait_connected(2.0)
     log_event(f"Tablet {'connected' if t_ok else 'pending'}")
@@ -196,19 +208,22 @@ def _startup_summary():
 
 # ---------------- SIM MODE LOOP ----------------
 def run_simulator():
-    try:    seq = [int(s.strip()) for s in os.getenv("SIM_VALUES","3,0").split(",") if s.strip()!=""]
-    except: seq = [3, 0]
+    try:
+        seq = [int(s.strip()) for s in os.getenv("SIM_VALUES","3,0").split(",") if s.strip()!=""]
+    except:
+        seq = [3, 0]
     if not seq: seq=[3,0]
-    idx=0; arm_streak=0; zero_up_streak=0; peak_up=0
+    idx=0; arm_streak=0; peak_up=0
     log_event(f"SIM MODE: sequence={seq} interval={SIM_INTERVAL_SEC:.1f}s  (to Tablet only)")
     while True:
         val = int(seq[idx % len(seq)]); peak_up = max(peak_up, val)
         ws_tablet.send_cards_detected(val)
         log_event(f"[SIM] cards_detected -> {val}")
         render_dashboard(face_up_now=val, cards_now=val, armed=False,
-                         arm_streak=arm_streak, zero_up_streak=zero_up_streak,
+                         arm_streak=arm_streak, zero_elapsed_sec=0.0,
                          peak_up=peak_up, cur_codes=[])
         time.sleep(SIM_INTERVAL_SEC); idx+=1
+
 
 # -------------- vision helpers --------------
 def _roi(frame, r):
@@ -559,10 +574,15 @@ class FrameSource:
 CLASSIFY_THRESH = 0.55
 DASH_EVERY_N = max(1, int(os.getenv("DASH_EVERY_N", "5")))
 
+zero_up_start_ts = None   # when we first see 0 face-up while ARMED
+zero_elapsed = 0.0        # seconds of continuous zero-up while ARMED
+
+
 def _sha1_digest_of_warp(warp_bgr):
     g = cv2.cvtColor(warp_bgr, cv2.COLOR_BGR2GRAY)
     h = hashlib.sha1(g.tobytes()).hexdigest()
     return h[:10]
+
 
 def main():
     os.makedirs(SAVE_DIR, exist_ok=True)
@@ -593,9 +613,13 @@ def main():
 
     armed = False
     arm_streak = 0
-    zero_up_streak = 0
     peak_up = 0
     init_card_detect_sent = False
+
+    # NEW: seconds-based zero-up timers
+    ZERO_UP_SEC = float(os.getenv("ZERO_UP_SEC", "2.0"))
+    zero_up_start_ts = None
+    zero_elapsed = 0.0
 
     global _last_obs, _same_streak
     _last_obs = None; _same_streak = 0
@@ -622,7 +646,7 @@ def main():
                 if ENFORCE_STARTUP_GRACE and (now - app_start_ts >= STARTUP_GRACE_S):
                     log_event(f"EXIT: startup grace ({int(STARTUP_GRACE_S)}s) expired without both WS up")
                     if frame_idx % DASH_EVERY_N == 0:
-                        render_dashboard(0,0,False,0,0,0, cur_codes=[])
+                        render_dashboard(0,0,False,0,0.0,0, cur_codes=[])
                     sys.exit(3)
         else:
             if both_up:
@@ -631,13 +655,13 @@ def main():
                 if ENFORCE_BOTH_WS and (now - ws_watchdog_start >= BOTH_WS_TIMEOUT_S):
                     log_event(f"EXIT: both WS not up simultaneously for {int(now - ws_watchdog_start)}s")
                     if frame_idx % DASH_EVERY_N == 0:
-                        render_dashboard(0,0,False,0,0,0, cur_codes=[])
+                        render_dashboard(0,0,False,0,0.0,0, cur_codes=[])
                     sys.exit(2)
 
         if not ok:
             time.sleep(SLEEP_SEC)
             if frame_idx % DASH_EVERY_N == 0:
-                render_dashboard(0, 0, armed, arm_streak, zero_up_streak, peak_up, cur_codes=[])
+                render_dashboard(0, 0, armed, arm_streak, zero_elapsed, peak_up, cur_codes=[])
             frame_idx += 1
             continue
 
@@ -677,10 +701,8 @@ def main():
 
         prev_count = slots.faceup_count()
 
-        # Update slots with current detections
+        # Update slots with current detections + GC to let counts drop
         changed_slots = slots.update_from_detections(detections, frame_idx)
-
-        # GC any expired/missing slots so counts actually drop (*** THE FIX ***)
         if slots.gc_expired(frame_idx, SLOT_FORGET_FRAMES):
             changed_slots = True
 
@@ -690,24 +712,30 @@ def main():
 
         det_codes = slots.codes_list()
 
-        def _codes_for_tablet(armed: bool, face_up_now: int, det_codes):
-            """
-            When ARMED, keep sending whatever codes we have for currently visible slots,
-            even if face_up_now < ARM_FACEUP_MIN (covers brief occlusions by dealer's hand).
-            When not armed, only send codes once we meet the arming minimum.
-            """
-            if face_up_now == 0:
+        def _codes_for_tablet(armed_flag: bool, fu_now: int, codes_now):
+            if fu_now == 0:
                 return []  # explicit zero payload on the tablet
-            if armed:
-                return list(det_codes)  # include UNK placeholders if any
-            # not armed yet -> keep old behavior
-            return list(det_codes) if face_up_now >= ARM_FACEUP_MIN else None
-        
+            if armed_flag:
+                return list(codes_now)
+            return list(codes_now) if fu_now >= ARM_FACEUP_MIN else None
 
         # >>> EARLY NOTIFY on any count change
         if (armed and face_up_now != prev_count) or (not armed and face_up_now >= ARM_FACEUP_MIN and face_up_now != prev_count):
             send_cards_change_or_every(face_up_now, codes=_codes_for_tablet(armed, face_up_now, det_codes))
         # <<<
+
+        # ---- zero-up timing (seconds) while ARMED ----
+        if armed:
+            if face_up_now == 0:
+                if zero_up_start_ts is None:
+                    zero_up_start_ts = now
+                zero_elapsed = now - zero_up_start_ts
+            else:
+                zero_up_start_ts = None
+                zero_elapsed = 0.0
+        else:
+            zero_up_start_ts = None
+            zero_elapsed = 0.0
 
         # ---- state machine ----
         if not armed:
@@ -715,19 +743,18 @@ def main():
             if arm_streak >= ARM_CONSEC_N:
                 armed = True
                 send_cards_change_or_every(face_up_now, codes=_codes_for_tablet(True, face_up_now, det_codes))
-                zero_up_streak = 0
                 peak_up = face_up_now
                 log_event(f"STATE -> ARMED (need {ARM_FACEUP_MIN}+ for {ARM_CONSEC_N})")
-
         else:
-            zero_up_streak = zero_up_streak + 1 if face_up_now == 0 else 0
-            if zero_up_streak >= ZERO_UP_CONSEC_N:
-                log_event(f"STATE -> RESET (zero-up for {ZERO_UP_CONSEC_N}, peak={peak_up})")
+            # seconds-based RESET while ARMED
+            if ZERO_UP_SEC > 0 and zero_elapsed >= ZERO_UP_SEC:
+                log_event(f"STATE -> RESET (zero-up for {ZERO_UP_SEC:.1f}s, peak={peak_up})")
                 send_cards_change_or_every(0, codes=[])  # explicit zero
                 send_reset_reliably()
                 armed = False
                 arm_streak = 0
-                zero_up_streak = 0
+                zero_up_start_ts = None
+                zero_elapsed = 0.0
                 peak_up = 0
                 det_codes = []
                 slots.clear()
@@ -765,7 +792,7 @@ def main():
             _last_obs = face_up_now; _same_streak = 0
 
         if frame_idx % DASH_EVERY_N == 0:
-            render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up, cur_codes=det_codes)
+            render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_elapsed, peak_up, cur_codes=det_codes)
 
         if SHOW_PREVIEW:
             cv2.imshow("Card Detector", frame)
@@ -778,6 +805,8 @@ def main():
     if workers: workers.stop()
     src.release()
     cv2.destroyAllWindows()
+
+
 
 if __name__ == "__main__":
     main()
