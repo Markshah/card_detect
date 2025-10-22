@@ -375,7 +375,7 @@ def send_reset_reliably():
     for attempt in range(1, WS_SEND_RETRIES+1):
         ok = ws_arduino.send_move_dealer_forward_burst(burst=WS_BURST_SENDS, spacing_ms=WS_BURST_SPACING_MS)
         if ok:
-            log_event(f"reset sent (attempt {attempt}/{WS_SEND_RETRIES})")
+            log_event(f"{CYAN}reset sent (attempt {attempt}/{WS_SEND_RETRIES}){RESET}")
             break
         log_event(f"reset retry {attempt}/{WS_SEND_RETRIES} in {WS_RETRY_DELAY_MS}ms")
         time.sleep(WS_RETRY_DELAY_MS/1000.0)
