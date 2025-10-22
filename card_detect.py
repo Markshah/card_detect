@@ -132,6 +132,10 @@ WS_RETRY_DELAY_MS   = int(os.getenv("WS_RETRY_DELAY_MS", "150"))
 WS_AWAIT_CONNECT_S  = float(os.getenv("WS_AWAIT_CONNECT_SEC", "1.5"))
 RESET_DEBOUNCE_SEC  = float(os.getenv("RESET_DEBOUNCE_SEC", "1.2"))
 
+
+RESET  = "\033[0m"; BOLD="\033[1m"; GREEN="\033[1;32m"; RED="\033[1;31m"; YELLOW="\033[1;33m"; CYAN="\033[36m"; GRAY="\033[90m"; BLUE="\033[34m"
+
+
 # ---- logging quiet mode ----
 if QUIET_LOGS:
     logging.getLogger().setLevel(logging.WARNING)
@@ -150,9 +154,7 @@ def log_event(s: str):
     ts = time.strftime("%H:%M:%S"); events.appendleft(f"{ts}  {s}")
 
 def render_dashboard(face_up_now, cards_now, armed, arm_streak, zero_up_streak, peak_up, cur_codes):
-    import os, sys
     sys.stdout.write("\033[2J\033[H")
-    RESET  = "\033[0m"; BOLD="\033[1m"; GREEN="\033[1;32m"; RED="\033[1;31m"; YELLOW="\033[1;33m"; CYAN="\033[36m"; GRAY="\033[90m"; BLUE="\033[34m"
     DASH_BIGTEXT = int(os.getenv("DASH_BIGTEXT","0"))
     dash_rows    = int(os.getenv("DASH_ROWS","5"))
 
@@ -353,14 +355,14 @@ def send_cards_change_or_every(count: int, codes=None):
     count = int(count)
     if _last_obs is None or count != _last_obs:
         _last_obs = count; _same_streak = 1
-        ws_tablet.send_cards_detected(count, codes=codes)
-        log_event(f"cards_detected -> {count} (changed) codes={codes or []}")
+        ok = ws_tablet.send_cards_detected(count, codes=codes)
+        log_event(f"[WS→TABLET] cards_detected count={count} codes={codes or []} ok={ok}")
         return True
     _same_streak += 1
     if _same_streak >= RESEND_EVERY:
         _same_streak = 0
-        ws_tablet.send_cards_detected(count, codes=codes)
-        log_event(f"cards_detected -> {count} (periodic) codes={codes or []}")
+        ok = ws_tablet.send_cards_detected(count, codes=codes)
+        log_event(f"[WS→TABLET] cards_detected count={count} codes={codes or []} ok={ok}")
         return True
     return False
 
@@ -373,7 +375,10 @@ def send_reset_reliably():
     ws_arduino.wait_connected(WS_AWAIT_CONNECT_S)
     ok = False
     for attempt in range(1, WS_SEND_RETRIES+1):
-        ok = ws_arduino.send_move_dealer_forward_burst(burst=WS_BURST_SENDS, spacing_ms=WS_BURST_SPACING_MS)
+        ok = ws_arduino.send_move_dealer_forward_burst(
+            burst=WS_BURST_SENDS, spacing_ms=WS_BURST_SPACING_MS
+        )
+
         if ok:
             log_event(f"{CYAN}reset sent (attempt {attempt}/{WS_SEND_RETRIES}){RESET}")
             break
