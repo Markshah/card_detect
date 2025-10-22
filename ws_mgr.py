@@ -11,6 +11,7 @@ PING_TIMEOUT   = int(os.getenv("WS_PING_TIMEOUT_SEC", "3"))
 
 # App-level heartbeat JSON; set to 0 to disable
 HB_INTERVAL    = int(os.getenv("WS_HEARTBEAT_SEC", "5"))
+HB_COMMAND     = os.getenv("WS_HEARTBEAT_CMD", "heartbeat").strip()  # "heartbeat" (default) or "ping"
 
 # If no messages/pongs/hearbeats are observed for this many seconds, we force-reconnect
 IDLE_RECON_SEC = int(os.getenv("WS_IDLE_RECONNECT_SEC", "12"))
@@ -80,7 +81,7 @@ class WSManager:
         """Block up to timeout seconds for a connection to be established."""
         return self._connected.wait(timeout)
 
-    def send_cards_detected(self, count, codes=None):
+    def send_cards_detected(self, count, codes=None) -> bool:
         """
         Send current count and optional list of codes.
         Expected by Android:
@@ -88,41 +89,42 @@ class WSManager:
             "command": "cards_detected",
             "data": {
                 "count": 3,
-                "codes": ["KD","JS"]
+                "codes": ["KD","JS"]  # may be []
             }
           }
+
+        Behavior:
+        - codes=None -> omit "codes"
+        - codes=[]   -> include "codes": []
         """
         try:
             data = {"count": int(count)}
-            if codes:
-                data["codes"] = [c.upper() for c in codes if c]
-    
+            if codes is not None:
+                # Normalize to uppercase; preserve explicit empty list
+                if isinstance(codes, (list, tuple)):
+                    data["codes"] = [str(c).upper() for c in codes if c is not None]
+                else:
+                    # if caller passed a scalar by accident
+                    data["codes"] = [str(codes).upper()]
+
             payload = {"command": "cards_detected", "data": data}
-    
-            self.send_json(payload)
-            return True
-        except Exception as e:
+            return self.send_json(payload)
+        except Exception:
             logging.exception("send_cards_detected failed")
             return False
-
 
     def send_move_dealer_forward(self) -> bool:
         """Send: {"command":"move_dealer_forward"}"""
         return self.send_json({"command": "move_dealer_forward"})
 
-    def send_move_dealer_forward_burst(self, burst: int = 1, spacing_ms: int = 0) -> bool:
-        """Send the command multiple times in a tiny burst; True if any succeed."""
-        ok_any = False
-        for i in range(max(1, burst)):
-            ok = self.send_move_dealer_forward()
-            ok_any = ok_any or ok
-            if i + 1 < burst and spacing_ms > 0:
-                time.sleep(spacing_ms / 1000.0)
-        return ok_any
+    def send_ping(self) -> bool:
+        """Send: {"command":"ping"}"""
+        return self.send_json({"command": "ping", "ts": time.time()})
 
     def send_json(self, payload: dict) -> bool:
-        """Thread-safe send; returns True if delivered."""
-        data = json.dumps(payload)
+        """Thread-safe send; returns True if delivered to the socket layer."""
+        # ensure ASCII-safe json (don’t pretty-print)
+        data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         with self._lock:
             if self._ws and self.is_connected:
                 try:
@@ -183,8 +185,11 @@ class WSManager:
             # App-level heartbeat JSON (optional)
             if self._hb_interval > 0 and self.is_connected:
                 try:
-                    # light heartbeat the server can ignore if it wants
-                    self.send_json({"command": "heartbeat", "ts": now})
+                    # Use whichever heartbeat the peer likes:
+                    #   - default "heartbeat"
+                    #   - set WS_HEARTBEAT_CMD=ping to appease Arduino's whitelist
+                    cmd = HB_COMMAND if HB_COMMAND else "heartbeat"
+                    self.send_json({"command": cmd, "ts": now})
                 except Exception:
                     pass
 

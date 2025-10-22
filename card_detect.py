@@ -125,8 +125,6 @@ from ws_mgr import WSManager
 TABLET_WS_URL  = os.getenv("TABLET_WS_URL",  "ws://192.168.1.246:8765").strip()
 ARDUINO_WS_URL = os.getenv("ARDUINO_WS_URL", "ws://192.168.1.245:8888").strip()
 
-WS_BURST_SENDS      = int(os.getenv("WS_BURST_SENDS", "1"))
-WS_BURST_SPACING_MS = int(os.getenv("WS_BURST_SPACING_MS", "40"))
 WS_SEND_RETRIES     = int(os.getenv("WS_SEND_RETRIES", "4"))
 WS_RETRY_DELAY_MS   = int(os.getenv("WS_RETRY_DELAY_MS", "150"))
 WS_AWAIT_CONNECT_S  = float(os.getenv("WS_AWAIT_CONNECT_SEC", "1.5"))
@@ -372,21 +370,20 @@ def send_reset_reliably():
     if now - _last_reset_ts < RESET_DEBOUNCE_SEC:
         log_event(f"reset skipped (debounce {now - _last_reset_ts:.1f}s)")
         return False
+
     ws_arduino.wait_connected(WS_AWAIT_CONNECT_S)
     ok = False
-    for attempt in range(1, WS_SEND_RETRIES+1):
-        ok = ws_arduino.send_move_dealer_forward_burst(
-            burst=WS_BURST_SENDS, spacing_ms=WS_BURST_SPACING_MS
-        )
-
+    for attempt in range(1, WS_SEND_RETRIES + 1):
+        ok = ws_arduino.send_move_dealer_forward()  # single send, not burst
         if ok:
             log_event(f"{CYAN}reset sent (attempt {attempt}/{WS_SEND_RETRIES}){RESET}")
-            break
+            _last_reset_ts = time.time()
+            return True
         log_event(f"reset retry {attempt}/{WS_SEND_RETRIES} in {WS_RETRY_DELAY_MS}ms")
-        time.sleep(WS_RETRY_DELAY_MS/1000.0)
-    if ok: _last_reset_ts = time.time()
-    else:  log_event("reset FAILED after retries")
-    return ok
+        time.sleep(WS_RETRY_DELAY_MS / 1000.0)
+
+    log_event(f"{RED}reset FAILED after retries{RESET}")
+    return False
 
 # === Background classification ===
 BG_CLASSIFY       = int(os.getenv("BG_CLASSIFY", "1"))
@@ -693,14 +690,23 @@ def main():
 
         det_codes = slots.codes_list()
 
-        def _codes_for_tablet():
-            if face_up_now < ARM_FACEUP_MIN or face_up_now == 0:
-                return None
-            return list(det_codes)
+        def _codes_for_tablet(armed: bool, face_up_now: int, det_codes):
+            """
+            When ARMED, keep sending whatever codes we have for currently visible slots,
+            even if face_up_now < ARM_FACEUP_MIN (covers brief occlusions by dealer's hand).
+            When not armed, only send codes once we meet the arming minimum.
+            """
+            if face_up_now == 0:
+                return []  # explicit zero payload on the tablet
+            if armed:
+                return list(det_codes)  # include UNK placeholders if any
+            # not armed yet -> keep old behavior
+            return list(det_codes) if face_up_now >= ARM_FACEUP_MIN else None
+        
 
-        # >>> EARLY NOTIFY on any count change once we're at/above the arming minimum
-        if face_up_now >= ARM_FACEUP_MIN and face_up_now != prev_count:
-            send_cards_change_or_every(face_up_now, codes=_codes_for_tablet())
+        # >>> EARLY NOTIFY on any count change
+        if (armed and face_up_now != prev_count) or (not armed and face_up_now >= ARM_FACEUP_MIN and face_up_now != prev_count):
+            send_cards_change_or_every(face_up_now, codes=_codes_for_tablet(armed, face_up_now, det_codes))
         # <<<
 
         # ---- state machine ----
@@ -708,10 +714,11 @@ def main():
             arm_streak = arm_streak + 1 if face_up_now >= ARM_FACEUP_MIN else 0
             if arm_streak >= ARM_CONSEC_N:
                 armed = True
-                send_cards_change_or_every(face_up_now, codes=_codes_for_tablet())
+                send_cards_change_or_every(face_up_now, codes=_codes_for_tablet(True, face_up_now, det_codes))
                 zero_up_streak = 0
                 peak_up = face_up_now
                 log_event(f"STATE -> ARMED (need {ARM_FACEUP_MIN}+ for {ARM_CONSEC_N})")
+
         else:
             zero_up_streak = zero_up_streak + 1 if face_up_now == 0 else 0
             if zero_up_streak >= ZERO_UP_CONSEC_N:
@@ -723,9 +730,10 @@ def main():
                 zero_up_streak = 0
                 peak_up = 0
                 det_codes = []
-                slots.clear()  # also invalidates in-flight classify jobs
+                slots.clear()
             else:
-                send_cards_change_or_every(face_up_now, codes=_codes_for_tablet())
+                # keep refreshing the tablet even if count < ARM_FACEUP_MIN
+                send_cards_change_or_every(face_up_now, codes=_codes_for_tablet(armed, face_up_now, det_codes))
 
         # ---- background classification for UNKNOWN slots ----
         improved = False
@@ -751,7 +759,7 @@ def main():
                             improved = True
 
         det_codes = slots.codes_list()
-        if improved and face_up_now >= ARM_FACEUP_MIN:
+        if improved and (armed or face_up_now >= ARM_FACEUP_MIN) and face_up_now > 0:
             ws_tablet.send_cards_detected(face_up_now, codes=list(det_codes))
             log_event(f"codes_update -> {face_up_now}")
             _last_obs = face_up_now; _same_streak = 0
