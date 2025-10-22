@@ -142,16 +142,67 @@ if QUIET_LOGS:
     logging.getLogger("websocket").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
-# Two persistent sockets
-ws_tablet  = WSManager(url=TABLET_WS_URL)
-ws_arduino = WSManager(url=ARDUINO_WS_URL)
-ws_tablet.start(); ws_arduino.start()
-atexit.register(lambda: (ws_tablet.stop(), ws_arduino.stop()))
 
 # ---------------- dashboard helpers ----------------
 events = deque(maxlen=DASH_ROWS)
 def log_event(s: str):
     ts = time.strftime("%H:%M:%S"); events.appendleft(f"{ts}  {s}")
+
+def _attach_arduino_send_logger():
+    """Wrap ws_arduino.send_json so every outbound Arduino message hits log_event."""
+    import json as _json
+
+    _orig_send_json = ws_arduino.send_json
+
+    def _wrapped_send_json(payload: dict) -> bool:
+        ok = _orig_send_json(payload)
+        # Extract a small, readable summary
+        cmd = payload.get("command") if isinstance(payload, dict) else None
+        try:
+            body = _json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        except Exception:
+            body = str(payload)
+        if len(body) > 200:
+            body = body[:200] + "…"
+        # Single, consistent log line
+        log_event(f"[WS→ARDUINO] cmd={cmd or '?'} ok={ok} connected={ws_arduino.is_connected} payload={body}")
+        return ok
+
+    ws_arduino.send_json = _wrapped_send_json
+
+
+def _attach_tablet_send_logger():
+    """Wrap ws_tablet.send_json so every outbound Tablet message hits log_event."""
+    import json as _json
+    _orig_send_json = ws_tablet.send_json
+
+    def _wrapped_send_json(payload: dict) -> bool:
+        ok = _orig_send_json(payload)
+        cmd = payload.get("command") if isinstance(payload, dict) else None
+        try:
+            body = _json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        except Exception:
+            body = str(payload)
+        if len(body) > 200:
+            body = body[:200] + "…"
+        log_event(f"[WS→TABLET]  cmd={cmd or '?'} ok={ok} connected={ws_tablet.is_connected} payload={body}")
+        return ok
+
+    ws_tablet.send_json = _wrapped_send_json
+
+
+
+# ---------------- sockets ----------------
+ws_tablet  = WSManager(url=TABLET_WS_URL,  on_event=log_event, name="Tablet")
+ws_arduino = WSManager(url=ARDUINO_WS_URL, on_event=log_event, name="Arduino")
+
+
+# Attach outbound loggers BEFORE starting so heartbeats are logged too
+_attach_arduino_send_logger()
+
+# Start and register cleanup
+ws_tablet.start(); ws_arduino.start()
+atexit.register(lambda: (ws_tablet.stop(), ws_arduino.stop()))
 
 
 def render_dashboard(face_up_now, cards_now, armed, arm_elapsed_sec, zero_elapsed_sec, peak_up, cur_codes):
@@ -388,22 +439,25 @@ def send_reset_reliably():
     global _last_reset_ts
     now = time.time()
     if now - _last_reset_ts < RESET_DEBOUNCE_SEC:
-        log_event(f"reset skipped (debounce {now - _last_reset_ts:.1f}s)")
+        log_event(f"reset skipped (debounce {now - _last_reset_ts:.2f}s < {RESET_DEBOUNCE_SEC:.2f}s)")
         return False
 
-    ws_arduino.wait_connected(WS_AWAIT_CONNECT_S)
-    ok = False
+    if not ws_arduino.wait_connected(WS_AWAIT_CONNECT_S):
+        log_event("reset not sent (Arduino WS not connected)")
+        return False
+
     for attempt in range(1, WS_SEND_RETRIES + 1):
-        ok = ws_arduino.send_move_dealer_forward()  # single send, not burst
+        log_event(f"[WS→ARDUINO] move_dealer_forward attempt {attempt}/{WS_SEND_RETRIES}")
+        ok = ws_arduino.send_move_dealer_forward()  # this will also trigger the wrapper log
         if ok:
-            log_event(f"{CYAN}reset sent (attempt {attempt}/{WS_SEND_RETRIES}){RESET}")
             _last_reset_ts = time.time()
+            log_event(f"{CYAN}reset sent (attempt {attempt}/{WS_SEND_RETRIES}){RESET}")
             return True
-        log_event(f"reset retry {attempt}/{WS_SEND_RETRIES} in {WS_RETRY_DELAY_MS}ms")
         time.sleep(WS_RETRY_DELAY_MS / 1000.0)
 
     log_event(f"{RED}reset FAILED after retries{RESET}")
     return False
+
 
 # === Background classification ===
 BG_CLASSIFY       = int(os.getenv("BG_CLASSIFY", "1"))
@@ -574,6 +628,8 @@ class FrameSource:
         if self.cap is not None:
             try: self.cap.release()
             except Exception: pass
+
+
 
 # -------------- main --------------
 CLASSIFY_THRESH = 0.55
