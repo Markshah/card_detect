@@ -1,11 +1,16 @@
 # rank_suit.py
 import os, cv2, numpy as np
+import math
 from functools import lru_cache
 
 # Accept both "10" and "T"
 _RMAP = {"A":"A","J":"J","Q":"Q","K":"K",
          "T":"10","10":"10","2":"2","3":"3","4":"4","5":"5","6":"6","7":"7","8":"8","9":"9"}
 _SUITS = ("S","H","D","C")
+
+
+USE_PIP_TIEBREAK   = int(os.getenv("USE_PIP_TIEBREAK", "1"))
+PIP_TIEBREAK_MARGIN = float(os.getenv("PIP_TIEBREAK_MARGIN", "0.025"))  # NCC closeness
 
 
 # --- rank-corner ROI (same coordinates for both warp and templates) ---
@@ -76,7 +81,9 @@ def _prep(gray):
     g = cv2.GaussianBlur(g, (3,3), 0)
     return g
 
+
 def _best_match(gwarp):
+    import os
     bank = _load_templates()
     if not bank:
         return None, 0.0
@@ -84,7 +91,7 @@ def _best_match(gwarp):
     H, W = bank[0][1].shape[:2]
     rank_rect = _rank_roi_rect(H, W)
 
-    # 1) full-image sweep (0° and 180° like you had)
+    # 1) full-image sweep (0° and 180°)
     top2 = []  # list of (score, code, templ_gray, candidate_gray)
     candidates = [gwarp, cv2.rotate(gwarp, cv2.ROTATE_180)]
     for g in candidates:
@@ -103,26 +110,145 @@ def _best_match(gwarp):
     if len(top2) == 1:
         return top2[0][1], float(top2[0][0])
 
-    # 2) tie-break only for 2/3/4 and when scores are close
+    # 2) existing tie-break (corner ROI) only for 2/3/4 when scores are close
     (s1, c1, t1, g1), (s2, c2, t2, g2) = top2
     R1, S1 = c1[:-1], c1[-1]
     R2, S2 = c2[:-1], c2[-1]
 
-    close = (s1 - s2) <= 0.02             # margin you can tune
+    close = (s1 - s2) <= 0.02            # your original margin
     small_ranks = {R1, R2}.issubset({"2","3","4"})
     same_suit = (S1 == S2)
 
     if close and small_ranks and same_suit:
-        # rank-only correlation in the corner ROI (higher resolution, more discriminative)
         gr1 = _roi(g1, rank_rect); tr1 = _roi(t1, rank_rect)
         gr2 = _roi(g2, rank_rect); tr2 = _roi(t2, rank_rect)
-        # If the ROI is tiny, INTER_LINEAR can blur; INTER_AREA is fine here.
         s1r = cv2.matchTemplate(gr1, tr1, cv2.TM_CCOEFF_NORMED)[0][0]
         s2r = cv2.matchTemplate(gr2, tr2, cv2.TM_CCOEFF_NORMED)[0][0]
-        if s2r > s1r + 1e-4:  # tiny epsilon
+        if s2r > s1r + 1e-4:
             return c2, float(s2)
         # else fall through to c1
+
+    # 3) NEW: pip-count tie-break (number cards only), gated by env
+    try:
+        USE_PIP_TIEBREAK = int(os.getenv("USE_PIP_TIEBREAK", "0"))
+        PIP_TIEBREAK_MARGIN = float(os.getenv("PIP_TIEBREAK_MARGIN", "0.025"))
+    except Exception:
+        USE_PIP_TIEBREAK, PIP_TIEBREAK_MARGIN = 0, 0.025
+
+    if USE_PIP_TIEBREAK and abs(s1 - s2) <= PIP_TIEBREAK_MARGIN:
+        def _rank_to_int(r: str):
+            if r in {"J","Q","K","A"}: return None
+            r = "10" if r in {"T","10"} else r
+            try: return int(r)
+            except: return None
+
+        r1 = _rank_to_int(R1)
+        r2 = _rank_to_int(R2)
+
+        if (r1 is not None) or (r2 is not None):
+            # Count pips on the higher-score rotation image (g1). It's grayscale already.
+            try:
+                count = pip_count_center(g1)  # function added elsewhere
+            except NameError:
+                count = None  # pip counter not present; skip
+            if count is not None:
+                m1 = (r1 == count) if r1 is not None else False
+                m2 = (r2 == count) if r2 is not None else False
+                # If exactly one candidate rank matches the pip count, prefer it.
+                if m1 ^ m2:
+                    return (c1, float(s1)) if m1 else (c2, float(s2))
+
+    # default: keep the top match
     return c1, float(s1)
+
+
+
+# ---------- center-only pip counter (no corners) ----------
+def pip_count_center(gray,
+                     center_crop_frac: float = 0.12,
+                     area_min: int = 350,
+                     area_max: int = 15000,
+                     close_k: int = 3,
+                     open_k: int = 2,
+                     dilate_k: int = 2,
+                     circ_min: float = 0.35,
+                     circ_max: float = 0.88,
+                     min_center_gap_frac: float = 0.55) -> int | None:
+    """
+    Count suit pips using only the center of a warped card (portrait ~400x560).
+    Returns 2..10 for number cards; None for face/unknown/ambiguous.
+    """
+    import cv2, numpy as np
+
+    if gray.ndim == 3:
+        gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
+
+    H, W = gray.shape
+    x0, x1 = int(W * center_crop_frac), int(W * (1 - center_crop_frac))
+    y0, y1 = int(H * center_crop_frac), int(H * (1 - center_crop_frac))
+    roi = gray[y0:y1, x0:x1]
+
+    roi_blur = cv2.GaussianBlur(roi, (5, 5), 0)
+    _, binv = cv2.threshold(roi_blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_k, close_k))
+    k_open  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (open_k, open_k))
+    mask = cv2.morphologyEx(binv, cv2.MORPH_CLOSE, k_close, iterations=1)
+    mask = cv2.morphologyEx(mask,  cv2.MORPH_OPEN,  k_open,  iterations=1)
+    if dilate_k > 0:
+        mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_k, dilate_k)), iterations=1)
+
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    candidates = []
+    roi_h, roi_w = mask.shape
+    for c in cnts:
+        a = cv2.contourArea(c)
+        if a < area_min or a > area_max:
+            continue
+        x, y, w, h = cv2.boundingRect(c)
+        # reject blobs touching the crop border (likely inner frame/art)
+        if x <= 0 or y <= 0 or (x + w) >= roi_w - 1 or (y + h) >= roi_h - 1:
+            continue
+        ar = w / float(h) if h else 0.0
+        if not (0.5 <= ar <= 1.8):
+            continue
+        hull = cv2.convexHull(c)
+        solidity = a / (cv2.contourArea(hull) + 1e-6)
+        if solidity < 0.75:
+            continue
+        p = cv2.arcLength(c, True)
+        circ = (4.0 * math.pi * a) / (p * p + 1e-6)
+        if not (circ_min <= circ <= circ_max):
+            continue
+        M = cv2.moments(c)
+        cx = (M["m10"] / (M["m00"] + 1e-6))
+        cy = (M["m01"] / (M["m00"] + 1e-6))
+        candidates.append({"c": c, "area": a, "cx": cx, "cy": cy, "scale": min(w, h)})
+
+    if not candidates:
+        return None
+
+    # de-dup: merge split blobs by proximity
+    candidates.sort(key=lambda d: d["area"], reverse=True)
+    taken = []
+    for d in candidates:
+        close = False
+        for k in taken:
+            gap = min(d["scale"], k["scale"]) * min_center_gap_frac
+            if ( (d["cx"]-k["cx"])**2 + (d["cy"]-k["cy"])**2 ) ** 0.5 < gap:
+                close = True
+                break
+        if not close:
+            taken.append(d)
+
+    n = len(taken)
+    total_ink = sum(d["area"] for d in taken) / float(roi_w * roi_h)
+
+    # final sanity for number cards
+    if 2 <= n <= 10 and 0.015 <= total_ink <= 0.25:
+        return n
+    return None
 
 
 def classify_fullcard(warp_bgr, score_thresh=0.60):
