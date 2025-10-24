@@ -3,18 +3,14 @@ import json, os, time, threading, logging
 from websocket import WebSocketApp
 
 # ---- Tunables (env) ---------------------------------------------------------
-DEFAULT_WS_URL = os.getenv("WS_URL", "ws://192.168.1.245:8888")
+DEFAULT_WS_URL = os.getenv("WS_URL", "ws://192.168.1.54:8888")  # default to Mac hub
 
-# Shorter pings help detect half-open sockets quickly
 PING_INTERVAL  = int(os.getenv("WS_PING_INTERVAL_SEC", "20"))
 PING_TIMEOUT   = int(os.getenv("WS_PING_TIMEOUT_SEC", "10"))
-# If no messages/pongs/hearbeats are observed for this many seconds, we force-reconnect
 IDLE_RECON_SEC = int(os.getenv("WS_IDLE_RECONNECT_SEC", "120"))
 
-# App-level heartbeat JSON; set to 0 to disable
 HB_INTERVAL    = int(os.getenv("WS_HEARTBEAT_SEC", "0"))
-HB_COMMAND     = os.getenv("WS_HEARTBEAT_CMD", "heartbeat").strip()  # "heartbeat" (default) or "ping"
-
+HB_COMMAND     = os.getenv("WS_HEARTBEAT_CMD", "heartbeat").strip()  # "heartbeat" or "ping"
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("WSManager")
@@ -26,8 +22,8 @@ class WSManager:
         url: str = DEFAULT_WS_URL,
         max_retries: int = 30,
         retry_delay: float = 3.0,
-        on_event=None,         # <-- NEW: callback(str) to surface events to your dashboard
-        name: str | None = None,  # <-- NEW: friendly label in messages
+        on_event=None,
+        name: str | None = None,
     ):
         self.url = url
         self.max_retries = max_retries   # 0 = retry forever
@@ -52,34 +48,27 @@ class WSManager:
 
     # ---- Lifecycle ---------------------------------------------------------
     def start(self):
-        """Start background connection (auto-reconnect, keepalive)."""
         if self._thread and self._thread.is_alive():
             return
         self._should_run.set()
         self._thread = threading.Thread(target=self._run_forever, daemon=True)
         self._thread.start()
 
-        # optional heartbeat (app-level keepalive + idle watchdog)
         if self._hb_interval > 0 and (not self._hb_thread or not self._hb_thread.is_alive()):
             self._hb_stop.clear()
             self._hb_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
             self._hb_thread.start()
 
     def stop(self):
-        """Close and stop retries/heartbeat."""
         self._should_run.clear()
         self._hb_stop.set()
         with self._lock:
             if self._ws:
-                try:
-                    self._ws.close()
-                except Exception:
-                    pass
+                try: self._ws.close()
+                except Exception: pass
                 self._ws = None
-        if self._thread:
-            self._thread.join(timeout=2)
-        if self._hb_thread:
-            self._hb_thread.join(timeout=2)
+        if self._thread: self._thread.join(timeout=2)
+        if self._hb_thread: self._hb_thread.join(timeout=2)
         self._connected.clear()
 
     # ---- Public API --------------------------------------------------------
@@ -88,17 +77,9 @@ class WSManager:
         return self._connected.is_set()
 
     def wait_connected(self, timeout: float = 1.5) -> bool:
-        """Block up to timeout seconds for a connection to be established."""
         return self._connected.wait(timeout)
 
     def send_cards_detected(self, count, codes=None) -> bool:
-        """
-        Send current count and optional list of codes.
-        Expected by Android:
-          {"command":"cards_detected","data":{"count":3,"codes":["KD","JS"]}}
-        - codes=None -> omit "codes"
-        - codes=[]   -> include "codes":[]
-        """
         try:
             data = {"count": int(count)}
             if codes is not None:
@@ -113,15 +94,12 @@ class WSManager:
             return False
 
     def send_move_dealer_forward(self) -> bool:
-        """Send: {"command":"move_dealer_forward"}"""
         return self.send_json({"command": "move_dealer_forward"})
 
     def send_ping(self) -> bool:
-        """Send: {"command":"ping"}"""
         return self.send_json({"command": "ping", "ts": time.time()})
 
     def send_json(self, payload: dict) -> bool:
-        """Thread-safe send; returns True if delivered to the socket layer."""
         data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         with self._lock:
             if self._ws and self.is_connected:
@@ -165,7 +143,6 @@ class WSManager:
             if not self._should_run.is_set():
                 break
 
-            # retry policy
             if self.max_retries and self._retry_count >= self.max_retries:
                 msg = "Max retry attempts reached; giving up."
                 log.error(msg)
@@ -182,11 +159,9 @@ class WSManager:
             time.sleep(delay)
 
     def _heartbeat_loop(self):
-        # App-level heartbeat + idle watchdog
         while not self._hb_stop.is_set():
             now = time.time()
 
-            # App-level heartbeat JSON (optional)
             if self._hb_interval > 0 and self.is_connected:
                 try:
                     cmd = HB_COMMAND if HB_COMMAND else "heartbeat"
@@ -194,7 +169,6 @@ class WSManager:
                 except Exception:
                     pass
 
-            # Idle watchdog: force reconnect if no RX for too long
             idle = now - self._last_rx_ts
             if IDLE_RECON_SEC > 0 and idle > IDLE_RECON_SEC:
                 log.warning("Idle %.1fs > %ds; forcing reconnect on %s",
@@ -202,21 +176,18 @@ class WSManager:
                 self._emit(f"[WS {self._name}] idle {idle:.1f}s > {IDLE_RECON_SEC}s → force reconnect")
                 self._force_reconnect()
 
-            # sleep until next check
             self._hb_stop.wait(max(1, self._hb_interval if self._hb_interval > 0 else 1))
 
     def _force_reconnect(self):
         with self._lock:
             try:
-                if self._ws:
-                    self._ws.close()
+                if self._ws: self._ws.close()
             except Exception:
                 pass
             self._connected.clear()
 
     @staticmethod
     def _jitter(base: float, n: int, rnd) -> float:
-        # small backoff + jitter (prevents reconnect storms)
         return base * min(5, 1 + 0.25 * n) * (0.75 + 0.5 * rnd.random())
 
     # ---- Event handlers ----------------------------------------------------
@@ -230,9 +201,10 @@ class WSManager:
     def _on_message(self, ws, msg):
         self._last_rx_ts = time.time()
         log.debug("WS message: %s", msg)
+        # If you want to surface tablet->app messages, emit here:
+        # self._emit(f"[WS {self._name}] RX: {msg}")
 
     def _on_pong(self, ws, frame_data):
-        # Any pong means the peer is alive
         self._last_rx_ts = time.time()
 
     def _on_error(self, ws, err):

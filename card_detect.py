@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # Wednesday Night Poker — Card Detector
-# v2025.10.20
-# Fix: auto-GC expired slots so counts drop after cards are removed (enables updates/reset)
+# v2025.10.24 — single-WS (Hub) refactor + clear logging
 
 import os, sys, cv2, time, atexit, numpy as np, logging, hashlib, threading, queue
 from collections import deque
@@ -58,10 +57,10 @@ SIM              = int(os.getenv("SIM","0"))
 SIM_INTERVAL_SEC = float(os.getenv("SIM_INTERVAL_SEC","12"))
 SIM_VALUES       = os.getenv("SIM_VALUES","3,0")
 
-# ---- WS grace/watchdog ----
-ENFORCE_STARTUP_GRACE = int(os.getenv("ENFORCE_STARTUP_GRACE","1"))
+# ---- WS grace/watchdog (unused now, but left for easy toggling if desired) ----
+ENFORCE_STARTUP_GRACE = int(os.getenv("ENFORCE_STARTUP_GRACE","0"))
 STARTUP_GRACE_S       = float(os.getenv("STARTUP_GRACE_SEC","1800"))
-ENFORCE_BOTH_WS       = int(os.getenv("ENFORCE_BOTH_WS","1"))
+ENFORCE_BOTH_WS       = int(os.getenv("ENFORCE_BOTH_WS","0"))
 BOTH_WS_TIMEOUT_S     = float(os.getenv("BOTH_WS_TIMEOUT_SEC","600"))
 
 SAVE_IMAGES     = int(os.getenv("SAVE_IMAGES", "0"))
@@ -112,29 +111,50 @@ ARM_FACEUP_MIN     = int(os.getenv("ARM_FACEUP_MIN", "2"))
 ZERO_UP_SEC        = float(os.getenv("ZERO_UP_SEC", "2.0"))
 ARM_SEC            = float(os.getenv("ARM_SEC", "1.5")) 
 
-
-
-# ---- slot forget/TTL (NEW) ----
-# If a slot hasn't been seen for this many frames, free it so counts can drop.
+# ---- slot forget/TTL ----
 SLOT_FORGET_FRAMES = int(os.getenv("SLOT_FORGET_FRAMES", "8"))
 
 # send policy
 RESEND_EVERY       = int(os.getenv("RESEND_EVERY", "5"))
 USE_GRAYSCALE_ONLY = int(os.getenv("USE_GRAYSCALE_ONLY","1"))
 
-# ---- websocket ----
+# ---------------- dashboard helpers (make sure events exists before log_event!) ----------------
+events = deque(maxlen=DASH_ROWS)
+def log_event(s: str):
+    ts = time.strftime("%H:%M:%S"); events.appendleft(f"{ts}  {s}")
+
+# ---------------- WebSocket: single connection to the Hub ----------------
 from ws_mgr import WSManager
-TABLET_WS_URL  = os.getenv("TABLET_WS_URL",  "ws://192.168.1.246:8765").strip()
-ARDUINO_WS_URL = os.getenv("ARDUINO_WS_URL", "ws://192.168.1.245:8888").strip()
+HUB_WS_URL = os.getenv("HUB_WS_URL", "ws://192.168.1.54:8888").strip()
+
+ws_hub = WSManager(url=HUB_WS_URL, on_event=log_event, name="Hub")
+
+def _attach_hub_send_logger():
+    import json as _json
+    _orig = ws_hub.send_json
+    def _wrapped(payload: dict) -> bool:
+        ok = _orig(payload)
+        cmd = payload.get("command") if isinstance(payload, dict) else None
+        try:
+            body = _json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        except Exception:
+            body = str(payload)
+        if len(body) > 200:
+            body = body[:200] + "…"
+        log_event(f"[WS→HUB] cmd={cmd or '?'} ok={ok} connected={ws_hub.is_connected} payload={body}")
+        return ok
+    ws_hub.send_json = _wrapped
+
+_attach_hub_send_logger()
+ws_hub.start()
+atexit.register(ws_hub.stop)
 
 WS_SEND_RETRIES     = int(os.getenv("WS_SEND_RETRIES", "4"))
 WS_RETRY_DELAY_MS   = int(os.getenv("WS_RETRY_DELAY_MS", "150"))
 WS_AWAIT_CONNECT_S  = float(os.getenv("WS_AWAIT_CONNECT_SEC", "1.5"))
 RESET_DEBOUNCE_SEC  = float(os.getenv("RESET_DEBOUNCE_SEC", "1.2"))
 
-
 RESET  = "\033[0m"; BOLD="\033[1m"; GREEN="\033[1;32m"; RED="\033[1;31m"; YELLOW="\033[1;33m"; CYAN="\033[36m"; GRAY="\033[90m"; BLUE="\033[34m"
-
 
 # ---- logging quiet mode ----
 if QUIET_LOGS:
@@ -142,71 +162,8 @@ if QUIET_LOGS:
     logging.getLogger("websocket").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
-
-# ---------------- dashboard helpers ----------------
-events = deque(maxlen=DASH_ROWS)
-def log_event(s: str):
-    ts = time.strftime("%H:%M:%S"); events.appendleft(f"{ts}  {s}")
-
-def _attach_arduino_send_logger():
-    """Wrap ws_arduino.send_json so every outbound Arduino message hits log_event."""
-    import json as _json
-
-    _orig_send_json = ws_arduino.send_json
-
-    def _wrapped_send_json(payload: dict) -> bool:
-        ok = _orig_send_json(payload)
-        # Extract a small, readable summary
-        cmd = payload.get("command") if isinstance(payload, dict) else None
-        try:
-            body = _json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
-        except Exception:
-            body = str(payload)
-        if len(body) > 200:
-            body = body[:200] + "…"
-        # Single, consistent log line
-        log_event(f"[WS→ARDUINO] cmd={cmd or '?'} ok={ok} connected={ws_arduino.is_connected} payload={body}")
-        return ok
-
-    ws_arduino.send_json = _wrapped_send_json
-
-
-def _attach_tablet_send_logger():
-    """Wrap ws_tablet.send_json so every outbound Tablet message hits log_event."""
-    import json as _json
-    _orig_send_json = ws_tablet.send_json
-
-    def _wrapped_send_json(payload: dict) -> bool:
-        ok = _orig_send_json(payload)
-        cmd = payload.get("command") if isinstance(payload, dict) else None
-        try:
-            body = _json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
-        except Exception:
-            body = str(payload)
-        if len(body) > 200:
-            body = body[:200] + "…"
-        log_event(f"[WS→TABLET]  cmd={cmd or '?'} ok={ok} connected={ws_tablet.is_connected} payload={body}")
-        return ok
-
-    ws_tablet.send_json = _wrapped_send_json
-
-
-
-# ---------------- sockets ----------------
-ws_tablet  = WSManager(url=TABLET_WS_URL,  on_event=log_event, name="Tablet")
-ws_arduino = WSManager(url=ARDUINO_WS_URL, on_event=log_event, name="Arduino")
-
-
-# Attach outbound loggers BEFORE starting so heartbeats are logged too
-_attach_arduino_send_logger()
-
-# Start and register cleanup
-ws_tablet.start(); ws_arduino.start()
-atexit.register(lambda: (ws_tablet.stop(), ws_arduino.stop()))
-
-
 def render_dashboard(face_up_now, cards_now, armed, arm_elapsed_sec, zero_elapsed_sec, peak_up, cur_codes):
-    import os, sys
+    import sys
     sys.stdout.write("\033[2J\033[H")
 
     DASH_BIGTEXT = int(os.getenv("DASH_BIGTEXT","0"))
@@ -214,11 +171,11 @@ def render_dashboard(face_up_now, cards_now, armed, arm_elapsed_sec, zero_elapse
     arm_target   = float(os.getenv("ARM_SEC", "1.5"))
     zero_target  = float(os.getenv("ZERO_UP_SEC", "2.0"))
 
-    print(f"{BOLD}\033[34m=== WED NIGHT POKER — CARD DETECTOR ==={RESET}")
-    t_ok = ws_tablet.is_connected; a_ok = ws_arduino.is_connected
-    t_color = GREEN if t_ok else RED; a_color = GREEN if a_ok else RED
-    print(f"{BOLD}Tablet : {t_color}{TABLET_WS_URL}{RESET}   [{t_color}{'UP' if t_ok else 'DOWN'}{RESET}]")
-    print(f"{BOLD}Arduino: {a_color}{ARDUINO_WS_URL}{RESET}   [{a_color}{'UP' if a_ok else 'DOWN'}{RESET}]")
+    print(f"{BOLD}\033[34m=== WED NIGHT POKER — CARD DETECTOR (via HUB) ==={RESET}")
+
+    h_ok = ws_hub.is_connected
+    h_color = GREEN if h_ok else RED
+    print(f"{BOLD}Hub    : {h_color}{HUB_WS_URL}{RESET}   [{h_color}{'UP' if h_ok else 'DOWN'}{RESET}]")
 
     pretty_codes = "  ".join(cur_codes[:5]) if cur_codes else ""
     if DASH_BIGTEXT and pretty_codes:
@@ -234,7 +191,6 @@ def render_dashboard(face_up_now, cards_now, armed, arm_elapsed_sec, zero_elapse
     print(f"{BOLD}{YELLOW}UP{RESET}:{GREEN}{face_up_now}{RESET}  "
           f"{YELLOW}DOWN{RESET}:{RED}{down_now}{RESET}\n")
 
-    # State display (seconds-based)
     if armed:
         nearing = (zero_target > 0 and zero_elapsed_sec >= zero_target)
         state_txt = f"{YELLOW}RESET{RESET}" if nearing else f"{GREEN}ARMED{RESET}"
@@ -253,14 +209,19 @@ def render_dashboard(face_up_now, cards_now, armed, arm_elapsed_sec, zero_elapse
             print("  " + color + line + RESET)
     sys.stdout.flush()
 
-
-
 def _startup_summary():
-    t_ok = ws_tablet.wait_connected(2.0); a_ok = ws_arduino.wait_connected(2.0)
-    log_event(f"Tablet {'connected' if t_ok else 'pending'}")
-    log_event(f"Arduino {'connected' if a_ok else 'pending'}")
+    h_ok = ws_hub.wait_connected(2.0)
+    log_event(f"Hub {'connected' if h_ok else 'pending'}")
 
 # ---------------- SIM MODE LOOP ----------------
+def _send_cards_to_hub(count, codes=None):
+    payload = {"command": "cards_detected", "data": {"count": int(count)}}
+    if codes is not None:
+        payload["data"]["codes"] = [str(c).upper() for c in (codes or [])]
+    ok = ws_hub.send_json(payload)
+    log_event(f"[WS→HUB] cards_detected count={count} codes={codes or []} ok={ok}")
+    return ok
+
 def run_simulator():
     try:
         seq = [int(s.strip()) for s in os.getenv("SIM_VALUES","3,0").split(",") if s.strip()!=""]
@@ -268,18 +229,16 @@ def run_simulator():
         seq = [3, 0]
     if not seq: seq=[3,0]
     idx=0; peak_up=0
-    log_event(f"SIM MODE: sequence={seq} interval={SIM_INTERVAL_SEC:.1f}s  (to Tablet only)")
+    log_event(f"SIM MODE: sequence={seq} interval={SIM_INTERVAL_SEC:.1f}s  (to HUB)")
     while True:
         val = int(seq[idx % len(seq)])
         peak_up = max(peak_up, val)
-        ws_tablet.send_cards_detected(val)
+        _send_cards_to_hub(val)
         log_event(f"[SIM] cards_detected -> {val}")
         render_dashboard(face_up_now=val, cards_now=val, armed=False,
                          arm_elapsed_sec=0.0, zero_elapsed_sec=0.0,
                          peak_up=peak_up, cur_codes=[])
         time.sleep(SIM_INTERVAL_SEC); idx+=1
-
-
 
 # -------------- vision helpers --------------
 def _roi(frame, r):
@@ -318,6 +277,104 @@ def _warp_from_contour(img_bgr, cnt, out_size=WARP_SIZE):
     M = cv2.getPerspectiveTransform(src, dst)
     warp = cv2.warpPerspective(img_bgr, M, (ow, oh))
     return warp, box, (W,H)
+
+
+# -------------- ring-only classifier helpers --------------
+_RING_CACHE = {}
+def _ring_indices(shape, rim_frac, inner_frac):
+    """
+    Returns (ring_mask, center_slice) for fast "white rim" detection.
+    - ring_mask: boolean array selecting a border ring around the card
+    - center_slice: tuple of slices selecting a central patch (for edge check)
+    """
+    key = (shape, rim_frac, inner_frac)
+    hit = _RING_CACHE.get(key)
+    if hit is not None:
+        return hit
+
+    h, w = shape
+    # rim thickness and inner boundary expressed as fractions of the short side
+    rim   = int(max(1, rim_frac    * min(h, w)))
+    inner = int(max(rim + 1, inner_frac * min(h, w)))
+
+    # Build a rectangular "band" of thickness `inner` on all four sides…
+    band = np.zeros((h, w), dtype=bool)
+    band[:inner, :]  = True
+    band[-inner:, :] = True
+    band[:, :inner]  = True
+    band[:, -inner:] = True
+
+    # …and carve out the inner-most part to leave a ring of thickness `rim`
+    inner_cut = np.zeros((h, w), dtype=bool)
+    inner_cut[:rim, :]  = True
+    inner_cut[-rim:, :] = True
+    inner_cut[:, :rim]  = True
+    inner_cut[:, -rim:] = True
+
+    ring = band & (~inner_cut)
+
+    # A small central square for checking interior edges (should be quiet for face-up)
+    csz = max(10, min(w, h) // 5)
+    cx0 = w // 2 - csz // 2
+    cy0 = h // 2 - csz // 2
+    ctr_slice = (slice(cy0, cy0 + csz), slice(cx0, cx0 + csz))
+
+    _RING_CACHE[key] = (ring, ctr_slice)
+    return _RING_CACHE[key]
+
+
+def classify_by_white_rim(warp_bgr, make_panel=True):
+    lab = cv2.cvtColor(warp_bgr, cv2.COLOR_BGR2LAB)
+    L   = lab[...,0].astype(np.float32)
+    a   = lab[...,1].astype(np.float32) - 128.0
+    b   = lab[...,2].astype(np.float32) - 128.0
+    C   = np.hypot(a, b)
+
+    ring, ctr = _ring_indices(L.shape, RIM_OUTER_FRAC, RIM_INNER_FRAC)
+    L_ring = L[ring]
+    if L_ring.size == 0:
+        return "face_down", {"rule":"no_ring"}, None
+
+    L_thr = np.percentile(L_ring, REL_WHITE_PCT * 100.0)
+    if USE_GRAYSCALE_ONLY:
+        white_mask = (L >= L_thr) & ring
+    else:
+        white_mask = (L >= L_thr) & (C <= CHROMA_MAX) & ring
+
+    white_frac = float(white_mask.mean())
+
+    normL = _normalize_L(L.astype(np.uint8))
+    edges = cv2.Canny(normL, DEBUG_EDGE_LOW, DEBUG_EDGE_HIGH)
+    rim_edge = float((edges[ring] > 0).mean())
+    center_edge = float((edges[ctr] > 0).mean())
+
+    stats = {
+        "crm": round(white_frac,3),
+        "rim_e": round(rim_edge,3),
+        "center_ed": round(center_edge,3),
+        "L_thr": float(L_thr)
+    }
+
+    label = "face_up" if (
+        white_frac >= FACEUP_WHITE_MIN and
+        rim_edge   <= RIM_EDGE_MAX    and
+        center_edge<= CENTER_EDGE_MAX
+    ) else "face_down"
+
+    panel = None
+    if (SAVE_WARPS or SAVE_RING_DEBUG) and make_panel:
+        overlay = warp_bgr.copy()
+        ring_vis = np.zeros_like(overlay)
+        ring_vis[white_mask.astype(bool)] = (0,255,0)
+        dbg1 = cv2.addWeighted(overlay, 0.85, ring_vis, 0.45, 0)
+
+        white_img = (white_mask.astype(np.uint8)*255)
+        edges_ring = (edges * ring.astype(np.uint8))
+        white_bgr = cv2.cvtColor(white_img, cv2.COLOR_GRAY2BGR)
+        edges_bgr = cv2.cvtColor(edges_ring, cv2.COLOR_GRAY2BGR)
+        panel = np.hstack([dbg1, white_bgr, edges_bgr])
+
+    return label, {"rule":"rim" if label=="face_up" else "rim-reject", **stats}, panel
 
 def _rej(msg):
     if LOG_REJECTIONS: print(msg)
@@ -359,61 +416,6 @@ def _card_candidates(mask, frame_w, frame_h):
                 _rej(f"[rej] abs_px_adapt short={short_px:.0f}/{ms:.0f} long={long_px:.0f}/{ml:.0f}"); continue
         yield cnt
 
-# -------------- ring-only classifier --------------
-_RING_CACHE = {}
-def _ring_indices(shape, rim_frac, inner_frac):
-    key = (shape, rim_frac, inner_frac)
-    hit = _RING_CACHE.get(key)
-    if hit is not None: return hit
-    h, w = shape
-    rim   = int(max(1, rim_frac   * min(h, w)))
-    inner = int(max(rim+1, inner_frac * min(h, w)))
-    band = np.zeros((h, w), dtype=bool)
-    band[:inner,:]  = True;  band[-inner:,:]  = True
-    band[:, :inner] = True;  band[:, -inner:] = True
-    inner_cut = np.zeros((h, w), dtype=bool)
-    inner_cut[:rim,:]  = True; inner_cut[-rim:,:]  = True
-    inner_cut[:, :rim] = True; inner_cut[:, -rim:] = True
-    ring = band & (~inner_cut)
-    csz = max(10, min(w, h)//5)
-    cx0 = w//2 - csz//2; cy0 = h//2 - csz//2
-    ctr_slice = (slice(cy0, cy0+csz), slice(cx0, cx0+csz))
-    _RING_CACHE[key] = (ring, ctr_slice)
-    return _RING_CACHE[key]
-
-def classify_by_white_rim(warp_bgr, make_panel=True):
-    lab = cv2.cvtColor(warp_bgr, cv2.COLOR_BGR2LAB)
-    L   = lab[...,0].astype(np.float32)
-    a   = lab[...,1].astype(np.float32) - 128.0
-    b   = lab[...,2].astype(np.float32) - 128.0
-    C   = np.hypot(a, b)
-    ring, ctr = _ring_indices(L.shape, RIM_OUTER_FRAC, RIM_INNER_FRAC)
-    L_ring = L[ring]
-    if L_ring.size == 0: return "face_down", {"rule":"no_ring"}, None
-    L_thr = np.percentile(L_ring, REL_WHITE_PCT * 100.0)
-    white_mask = (L >= L_thr) & ring if USE_GRAYSCALE_ONLY else ((L >= L_thr) & (C <= CHROMA_MAX) & ring)
-    white_frac = float(white_mask.mean())
-    normL = _normalize_L(L.astype(np.uint8))
-    edges = cv2.Canny(normL, DEBUG_EDGE_LOW, DEBUG_EDGE_HIGH)
-    rim_edge = float((edges[ring] > 0).mean())
-    center_edge = float((edges[ctr] > 0).mean())
-    stats = {"crm": round(white_frac,3), "rim_e": round(rim_edge,3), "center_ed": round(center_edge,3), "L_thr": float(L_thr)}
-    label = "face_up" if (white_frac >= FACEUP_WHITE_MIN and rim_edge <= RIM_EDGE_MAX and center_edge <= CENTER_EDGE_MAX) else "face_down"
-
-    panel = None
-    if (SAVE_WARPS or SAVE_RING_DEBUG) and make_panel:
-        overlay = warp_bgr.copy()
-        ring_vis = np.zeros_like(overlay)
-        ring_vis[white_mask.astype(bool)] = (0,255,0)
-        dbg1 = cv2.addWeighted(overlay, 0.85, ring_vis, 0.45, 0)
-        white_img = (white_mask.astype(np.uint8)*255)
-        edges_ring = (edges * ring.astype(np.uint8))
-        white_bgr = cv2.cvtColor(white_img, cv2.COLOR_GRAY2BGR)
-        edges_bgr = cv2.cvtColor(edges_ring, cv2.COLOR_GRAY2BGR)
-        panel = np.hstack([dbg1, white_bgr, edges_bgr])
-
-    return label, {"rule":"rim" if label=="face_up" else "rim-reject", **stats}, panel
-
 # -------------- WS helpers --------------
 _last_obs = None
 _same_streak = 0
@@ -424,14 +426,12 @@ def send_cards_change_or_every(count: int, codes=None):
     count = int(count)
     if _last_obs is None or count != _last_obs:
         _last_obs = count; _same_streak = 1
-        ok = ws_tablet.send_cards_detected(count, codes=codes)
-        log_event(f"[WS→TABLET] cards_detected count={count} codes={codes or []} ok={ok}")
+        _send_cards_to_hub(count, codes=codes)
         return True
     _same_streak += 1
     if _same_streak >= RESEND_EVERY:
         _same_streak = 0
-        ok = ws_tablet.send_cards_detected(count, codes=codes)
-        log_event(f"[WS→TABLET] cards_detected count={count} codes={codes or []} ok={ok}")
+        _send_cards_to_hub(count, codes=codes)
         return True
     return False
 
@@ -442,22 +442,21 @@ def send_reset_reliably():
         log_event(f"reset skipped (debounce {now - _last_reset_ts:.2f}s < {RESET_DEBOUNCE_SEC:.2f}s)")
         return False
 
-    if not ws_arduino.wait_connected(WS_AWAIT_CONNECT_S):
-        log_event("reset not sent (Arduino WS not connected)")
+    if not ws_hub.wait_connected(WS_AWAIT_CONNECT_S):
+        log_event("reset not sent (Hub WS not connected)")
         return False
 
     for attempt in range(1, WS_SEND_RETRIES + 1):
-        log_event(f"[WS→ARDUINO] move_dealer_forward attempt {attempt}/{WS_SEND_RETRIES}")
-        ok = ws_arduino.send_move_dealer_forward()  # this will also trigger the wrapper log
+        log_event(f"[WS→HUB] move_dealer_forward attempt {attempt}/{WS_SEND_RETRIES}")
+        ok = ws_hub.send_json({"command": "move_dealer_forward"})
         if ok:
             _last_reset_ts = time.time()
-            log_event(f"{CYAN}reset sent (attempt {attempt}/{WS_SEND_RETRIES}){RESET}")
+            log_event(f"{CYAN}reset sent via HUB (attempt {attempt}/{WS_SEND_RETRIES}){RESET}")
             return True
         time.sleep(WS_RETRY_DELAY_MS / 1000.0)
 
-    log_event(f"{RED}reset FAILED after retries{RESET}")
+    log_event(f"{RED}reset FAILED after retries (to HUB){RESET}")
     return False
-
 
 # === Background classification ===
 BG_CLASSIFY       = int(os.getenv("BG_CLASSIFY", "1"))
@@ -506,13 +505,13 @@ class ClassifyWorkers:
         return out
     def stop(self): self._stop.set()
 
-# === Stable 5-slot tracker with GC (NEW) ===
+# === Stable 5-slot tracker with GC ===
 class SlotTracker:
     def __init__(self, max_slots=5, prox_gate_px=80):
         self.max_slots = max_slots
         self.prox_gate = int(prox_gate_px)
         self.slots = [None] * self.max_slots
-        self.epoch = 0  # increments on RESET to invalidate in-flight jobs
+        self.epoch = 0
     def clear(self):
         self.slots = [None] * self.max_slots
         self.epoch += 1
@@ -532,7 +531,6 @@ class SlotTracker:
         return [s["code"] if s else "UNK" for s in self.slots]
     def update_from_detections(self, detections, frame_idx):
         changed = False
-        # pass 1: digest exact matches
         unmatched = []
         for det in detections:
             matched = False
@@ -545,7 +543,6 @@ class SlotTracker:
                     matched = True
                     break
             if not matched: unmatched.append(det)
-        # pass 2: proximity matches (only if slot wasn't already updated this frame)
         still_unmatched = []
         for det in unmatched:
             i = self._nearest_slot(det["x"], det["y"])
@@ -559,7 +556,6 @@ class SlotTracker:
                     still_unmatched.append(det)
             else:
                 still_unmatched.append(det)
-        # pass 3: first empty slots
         for det in still_unmatched:
             for i in range(self.max_slots):
                 if self.slots[i] is None:
@@ -575,7 +571,6 @@ class SlotTracker:
                     break
         return changed
     def gc_expired(self, frame_idx, forget_frames=SLOT_FORGET_FRAMES):
-        """NEW: free any slot not seen in the last N frames"""
         changed = False
         cutoff = frame_idx - max(1, int(forget_frames))
         for i, s in enumerate(self.slots):
@@ -629,21 +624,17 @@ class FrameSource:
             try: self.cap.release()
             except Exception: pass
 
-
-
 # -------------- main --------------
 CLASSIFY_THRESH = 0.55
 DASH_EVERY_N = max(1, int(os.getenv("DASH_EVERY_N", "5")))
 
-zero_up_start_ts = None   # when we first see 0 face-up while ARMED
-zero_elapsed = 0.0        # seconds of continuous zero-up while ARMED
-
+zero_up_start_ts = None
+zero_elapsed = 0.0
 
 def _sha1_digest_of_warp(warp_bgr):
     g = cv2.cvtColor(warp_bgr, cv2.COLOR_BGR2GRAY)
     h = hashlib.sha1(g.tobytes()).hexdigest()
     return h[:10]
-
 
 def main():
     os.makedirs(SAVE_DIR, exist_ok=True)
@@ -667,10 +658,6 @@ def main():
         src = FrameSource(CAMERA_INDEX, TEST_FILES if TEST_ENABLE else "", TEST_INTERVAL_SEC)
     except Exception as e:
         print(str(e)); return
-
-    app_start_ts = time.time()
-    ws_watchdog_start = app_start_ts
-    both_connected_once = False
 
     # seconds-based thresholds
     ARM_SEC     = float(os.getenv("ARM_SEC", "1.5"))
@@ -698,28 +685,9 @@ def main():
         ok, frame = src.read()
         now = time.time()
 
-        # ---- Both-WS policy (startup grace + runtime watchdog) ----
-        both_up = (ws_tablet.is_connected and ws_arduino.is_connected)
-        if not both_connected_once:
-            if both_up:
-                both_connected_once = True
-                ws_watchdog_start = now
-                log_event("Both WS connected — runtime watchdog ARMED")
-            else:
-                if ENFORCE_STARTUP_GRACE and (now - app_start_ts >= STARTUP_GRACE_S):
-                    log_event(f"EXIT: startup grace ({int(STARTUP_GRACE_S)}s) expired without both WS up")
-                    if frame_idx % DASH_EVERY_N == 0:
-                        render_dashboard(0,0,False,0.0,0.0,0, cur_codes=[])
-                    sys.exit(3)
-        else:
-            if both_up:
-                ws_watchdog_start = now
-            else:
-                if ENFORCE_BOTH_WS and (now - ws_watchdog_start >= BOTH_WS_TIMEOUT_S):
-                    log_event(f"EXIT: both WS not up simultaneously for {int(now - ws_watchdog_start)}s")
-                    if frame_idx % DASH_EVERY_N == 0:
-                        render_dashboard(0,0,False,0.0,0.0,0, cur_codes=[])
-                    sys.exit(2)
+        # Light status note (no hard exit)
+        if not ws_hub.is_connected and frame_idx % max(1, DASH_EVERY_N*2) == 0:
+            log_event("Hub not connected yet…")
 
         if not ok:
             time.sleep(SLEEP_SEC)
@@ -729,7 +697,7 @@ def main():
             continue
 
         if not init_card_detect_sent:
-            ws_tablet.send_cards_detected(0, codes=[])
+            _send_cards_to_hub(0, codes=[])
             init_card_detect_sent = True
             log_event("init card detect sent")
 
@@ -776,17 +744,15 @@ def main():
         det_codes   = slots.codes_list()
 
         def _codes_for_tablet(armed_flag: bool, fu_now: int, codes_now):
-            # While armed, always send whatever we have (covers occlusions).
             if fu_now == 0:
                 return []  # explicit zero
             if armed_flag:
                 return list(codes_now)
             return list(codes_now) if fu_now >= ARM_FACEUP_MIN else None
 
-        # >>> EARLY NOTIFY on any count change
+        # EARLY NOTIFY on any count change
         if (armed and face_up_now != prev_count) or (not armed and face_up_now >= ARM_FACEUP_MIN and face_up_now != prev_count):
             send_cards_change_or_every(face_up_now, codes=_codes_for_tablet(armed, face_up_now, det_codes))
-        # <<<
 
         # ---- seconds-based arming & reset ----
         if not armed:
@@ -826,7 +792,6 @@ def main():
                 det_codes = []
                 slots.clear()
             else:
-                # keep refreshing the tablet even if count < ARM_FACEUP_MIN
                 send_cards_change_or_every(face_up_now, codes=_codes_for_tablet(armed, face_up_now, det_codes))
 
         # ---- background classification for UNKNOWN slots ----
@@ -854,7 +819,7 @@ def main():
 
         det_codes = slots.codes_list()
         if improved and (armed or face_up_now >= ARM_FACEUP_MIN) and face_up_now > 0:
-            ws_tablet.send_cards_detected(face_up_now, codes=list(det_codes))
+            _send_cards_to_hub(face_up_now, codes=list(det_codes))
             log_event(f"codes_update -> {face_up_now}")
             _last_obs = face_up_now; _same_streak = 0
 
@@ -872,13 +837,6 @@ def main():
     if workers: workers.stop()
     src.release()
     cv2.destroyAllWindows()
-
-
-
-
-
-
-
 
 if __name__ == "__main__":
     main()
