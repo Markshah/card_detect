@@ -56,14 +56,21 @@ class SerialBridge:
         self._thr = None
         self._wire = wire
 
+
     def open(self):
         log.info(f"Opening serial: {self.port} @ {self.baud}")
-        self.ser = serial.Serial(self.port, self.baud, timeout=0.2, write_timeout=1.0)
-        # UNO R4 typically resets on open; give it a moment
-        time.sleep(1.8)
-        self._thr = threading.Thread(target=self._reader_loop, name="serial-reader", daemon=True)
-        self._thr.start()
-        log.info("Serial opened.")
+        try:
+            self.ser = serial.Serial(self.port, self.baud, timeout=0.2, write_timeout=1.0)
+            # UNO R4 typically resets on open; give it a moment
+            time.sleep(1.8)
+            self._thr = threading.Thread(target=self._reader_loop, name="serial-reader", daemon=True)
+            self._thr.start()
+            log.info("Serial opened.")
+        except serial.SerialException as e:
+            log.warning(f"⚠️  Could not open serial port {self.port}: {e}.")
+            log.warning("Continuing without Arduino (Hub will still serve WS clients).")
+            self.ser = None
+
 
     def close(self):
         self._stop.set()
