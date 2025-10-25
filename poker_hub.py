@@ -57,6 +57,7 @@ class SerialBridge:
         self._wire = wire
 
 
+
     def open(self):
         log.info(f"Opening serial: {self.port} @ {self.baud}")
         try:
@@ -67,8 +68,10 @@ class SerialBridge:
             self._thr.start()
             log.info("Serial opened.")
         except serial.SerialException as e:
-            log.warning(f"⚠️  Could not open serial port {self.port}: {e}.")
-            log.warning("Continuing without Arduino (Hub will still serve WS clients).")
+            RED = "\033[91m"
+            RESET = "\033[0m"
+            log.warning(f"{RED}⚠️  Could not open serial port {self.port}: {e}{RESET}")
+            log.warning(f"{RED}Continuing without Arduino (Hub will still serve WS clients).{RESET}")
             self.ser = None
 
 
