@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Wednesday Night Poker — Card Detector
 # v2025.10.24 — single-WS (Hub) refactor + clear logging
+# Change: send `deal_completed` to tablet (via Hub) instead of `move_dealer_forward` to Arduino
 
 import os, sys, cv2, time, atexit, numpy as np, logging, hashlib, threading, queue
 from collections import deque
@@ -109,7 +110,7 @@ ADAPT_SLOP_L = 90
 # ---- arming / reset policy ----
 ARM_FACEUP_MIN     = int(os.getenv("ARM_FACEUP_MIN", "2"))
 ZERO_UP_SEC        = float(os.getenv("ZERO_UP_SEC", "2.0"))
-ARM_SEC            = float(os.getenv("ARM_SEC", "1.5")) 
+ARM_SEC            = float(os.getenv("ARM_SEC", "1.5"))
 
 # ---- slot forget/TTL ----
 SLOT_FORGET_FRAMES = int(os.getenv("SLOT_FORGET_FRAMES", "8"))
@@ -419,7 +420,7 @@ def _card_candidates(mask, frame_w, frame_h):
 # -------------- WS helpers --------------
 _last_obs = None
 _same_streak = 0
-_last_reset_ts = 0.0
+_last_deal_completed_ts = 0.0  # (was _last_reset_ts)
 
 def send_cards_change_or_every(count: int, codes=None):
     global _last_obs, _same_streak
@@ -435,27 +436,31 @@ def send_cards_change_or_every(count: int, codes=None):
         return True
     return False
 
-def send_reset_reliably():
-    global _last_reset_ts
+def send_deal_completed_reliably():
+    """
+    Notify the tablet (via Hub) that a deal/hand has completed.
+    Replaces the old Arduino 'move_dealer_forward' command.
+    """
+    global _last_deal_completed_ts
     now = time.time()
-    if now - _last_reset_ts < RESET_DEBOUNCE_SEC:
-        log_event(f"reset skipped (debounce {now - _last_reset_ts:.2f}s < {RESET_DEBOUNCE_SEC:.2f}s)")
+    if now - _last_deal_completed_ts < RESET_DEBOUNCE_SEC:
+        log_event(f"deal_completed skipped (debounce {now - _last_deal_completed_ts:.2f}s < {RESET_DEBOUNCE_SEC:.2f}s)")
         return False
 
     if not ws_hub.wait_connected(WS_AWAIT_CONNECT_S):
-        log_event("reset not sent (Hub WS not connected)")
+        log_event("deal_completed not sent (Hub WS not connected)")
         return False
 
     for attempt in range(1, WS_SEND_RETRIES + 1):
-        log_event(f"[WS→HUB] move_dealer_forward attempt {attempt}/{WS_SEND_RETRIES}")
-        ok = ws_hub.send_json({"command": "move_dealer_forward"})
+        log_event(f"[WS→HUB] deal_completed attempt {attempt}/{WS_SEND_RETRIES}")
+        ok = ws_hub.send_json({"command": "deal_completed"})
         if ok:
-            _last_reset_ts = time.time()
-            log_event(f"{CYAN}reset sent via HUB (attempt {attempt}/{WS_SEND_RETRIES}){RESET}")
+            _last_deal_completed_ts = time.time()
+            log_event(f"{CYAN}deal_completed sent via HUB (attempt {attempt}/{WS_SEND_RETRIES}){RESET}")
             return True
         time.sleep(WS_RETRY_DELAY_MS / 1000.0)
 
-    log_event(f"{RED}reset FAILED after retries (to HUB){RESET}")
+    log_event(f"{RED}deal_completed FAILED after retries (to HUB){RESET}")
     return False
 
 # === Background classification ===
@@ -782,7 +787,8 @@ def main():
             if ZERO_UP_SEC > 0 and zero_elapsed >= ZERO_UP_SEC:
                 log_event(f"STATE -> RESET (zero-up for {ZERO_UP_SEC:.1f}s, peak={peak_up})")
                 send_cards_change_or_every(0, codes=[])  # explicit zero
-                send_reset_reliably()
+                # NEW: notify tablet that the hand/deal is complete
+                send_deal_completed_reliably()
                 armed = False
                 arm_start_ts = None
                 arm_elapsed = 0.0

@@ -56,8 +56,6 @@ class SerialBridge:
         self._thr = None
         self._wire = wire
 
-
-
     def open(self):
         log.info(f"Opening serial: {self.port} @ {self.baud}")
         try:
@@ -73,7 +71,6 @@ class SerialBridge:
             log.warning(f"{RED}⚠️  Could not open serial port {self.port}: {e}{RESET}")
             log.warning(f"{RED}Continuing without Arduino (Hub will still serve WS clients).{RESET}")
             self.ser = None
-
 
     def close(self):
         self._stop.set()
@@ -221,20 +218,17 @@ class HubServer:
                     await ws.send(json.dumps({"command": "pong"}))
                     continue
 
-
-                # -------- Routing rules (with detector's move_dealer_forward -> SERIAL) --------
+                # -------- Routing rules --------
                 cmd = j.get("command")
 
                 if role == ROLE_DETECTOR:
                     if cmd == "cards_detected":
                         # DETECTOR -> TABLET
                         await self._forward_to_tablets(j)
-                    elif cmd == "move_dealer_forward":
-                        # DETECTOR -> ARDUINO (Serial)  <<< fixed per your note
-                        self.sb.write_line(json.dumps(j, separators=(",", ":")))
+                    elif cmd == "deal_completed":
+                        await self._forward_to_tablets(j)
                     else:
-                        # ignore or treat as detector->tablet if you prefer:
-                        # await self._forward_to_tablets(j)
+                        # ignore or route as needed
                         pass
                     continue
 
@@ -255,10 +249,10 @@ class HubServer:
             log.info(f"Client disconnected: {peer}")
 
     def _infer_role_from_message(self, j: dict) -> str:
-        # If it's clearly detector output
-        if j.get("command") == "cards_detected":
+        # Treat detector-originated signals as detector for correct routing
+        if j.get("command") in ("cards_detected", "deal_completed"):
             return ROLE_DETECTOR
-        # If it's a control (e.g., move_dealer_forward) and came from WS, we treat it as tablet by default
+        # If it's a control (e.g., move_dealer_forward) and came from WS, treat as tablet by default
         return ROLE_TABLET
 
     # ---------- Broadcast helpers ----------
