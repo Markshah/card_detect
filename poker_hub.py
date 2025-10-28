@@ -1,27 +1,51 @@
 #!/usr/bin/env python3
 """
-Poker Table Hub (Mac) — WebSocket <-> USB Serial bridge with role-based routing
+Poker Table Hub (Mac mini)
+- WebSocket <-> USB Serial bridge with role-based routing
+- HTTP endpoint for a Custom Alexa Skill
 
 Routing rules:
 - DETECTOR  -> TABLET only
 - TABLET    -> ARDUINO (Serial) only
 - ARDUINO   -> TABLET only
+- HTTP (/alexa, POST) -> TABLET broadcast (rebuy command)
 
-Examples:
+Run examples:
   python poker_hub.py --serial /dev/tty.usbmodem48CA435C84242 --wire
   python poker_hub.py --ws-port 8888 --baud 115200 --wire
+
+Env (optional):
+  WS_HOST=0.0.0.0
+  WS_PORT=8888
+  BAUD=115200
+  HTTP_BRIDGE_PORT=8787
+  FIXED_REBUY_AMOUNT=100
+  ALEXA_SKILL_ID=amzn1.ask.skill.xxxxx...        # your exact Skill ID (recommended)
 """
 
 import asyncio, json, logging, argparse, os, sys, glob, threading, time
 import serial            # pip install pyserial
 import websockets        # pip install websockets
+from aiohttp import web  # pip install aiohttp
+
+# ------------ optional dotenv ------------
+try:
+    from dotenv import load_dotenv
+    if os.path.exists("env"):
+        load_dotenv("env")
+except Exception:
+    pass
 
 # --------------------------
 # Configuration defaults
 # --------------------------
-DEFAULT_WS_HOST = "0.0.0.0"
-DEFAULT_WS_PORT = 8888
-DEFAULT_BAUD    = 115200
+DEFAULT_WS_HOST = os.getenv("WS_HOST", "0.0.0.0")
+DEFAULT_WS_PORT = int(os.getenv("WS_PORT", "8888"))
+DEFAULT_BAUD    = int(os.getenv("BAUD", "115200"))
+
+DEFAULT_HTTP_PORT     = int(os.getenv("HTTP_BRIDGE_PORT", "8787"))
+FIXED_REBUY           = int(os.getenv("FIXED_REBUY_AMOUNT", "100"))
+ALEXA_SKILL_ID        = os.getenv("ALEXA_SKILL_ID", "").strip()
 
 LOG_FORMAT = "[%(asctime)s] %(levelname)s %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
@@ -66,8 +90,7 @@ class SerialBridge:
             self._thr.start()
             log.info("Serial opened.")
         except serial.SerialException as e:
-            RED = "\033[91m"
-            RESET = "\033[0m"
+            RED = "\033[91m"; RESET = "\033[0m"
             log.warning(f"{RED}⚠️  Could not open serial port {self.port}: {e}{RESET}")
             log.warning(f"{RED}Continuing without Arduino (Hub will still serve WS clients).{RESET}")
             self.ser = None
@@ -141,6 +164,13 @@ class HubServer:
         self._wire = wire
         self.loop: asyncio.AbstractEventLoop | None = None
 
+        # simple dedupe for rebuys (per seat)
+        self._last_rebuy_ts_by_seat: dict[int, int] = {}
+        self._dedupe_ms = 1500
+
+        # aiohttp bits
+        self._http_runner: web.AppRunner | None = None
+
     async def start(self):
         # Bind queue + loop to the serial bridge
         self.loop = asyncio.get_running_loop()
@@ -153,13 +183,114 @@ class HubServer:
         # Start serial→tablet broadcaster
         broadcaster = asyncio.create_task(self._broadcast_serial_lines_to_tablets())
 
+        # Start HTTP bridge (Alexa)
+        await self._start_http_bridge()
+
         async with websockets.serve(self._handler, self.host, self.port, ping_interval=20, ping_timeout=20):
             log.info(f"WebSocket server listening on ws://{self.host}:{self.port}")
             try:
                 await asyncio.Future()  # run forever
             finally:
                 broadcaster.cancel()
+                await self._stop_http_bridge()
                 self.sb.close()
+
+    # ---------- HTTP bridge ----------
+    async def _start_http_bridge(self):
+        app = web.Application()
+
+        async def _health(_req):
+            return web.Response(text="ok")
+
+        app.add_routes([
+            web.get("/alexa", _health),         # GET (and HEAD implicitly)
+            web.post("/alexa", self._handle_alexa),
+            web.get("/healthz", _health),
+        ])
+
+        self._http_runner = web.AppRunner(app)
+        await self._http_runner.setup()
+        site = web.TCPSite(self._http_runner, "0.0.0.0", DEFAULT_HTTP_PORT)
+        await site.start()
+        log.info(f"HTTP bridge listening on http://0.0.0.0:{DEFAULT_HTTP_PORT}  (POST /alexa)")
+
+    async def _stop_http_bridge(self):
+        if self._http_runner:
+            await self._http_runner.cleanup()
+            self._http_runner = None
+
+    # ---------- Alexa handler ----------
+    async def _handle_alexa(self, request: web.Request) -> web.Response:
+        """Minimal Alexa Custom Skill handler (RebuyIntent seatNumber)."""
+        def say(text: str):
+            return web.json_response({
+                "version": "1.0",
+                "response": {
+                    "shouldEndSession": True,
+                    "outputSpeech": {"type": "PlainText", "text": text}
+                }
+            })
+
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "bad json"}, status=400)
+
+        # Verify Skill ID if provided (private/safer)
+        app_id = (
+            body.get("session", {})
+                .get("application", {})
+                .get("applicationId")
+            or body.get("context", {})
+                .get("System", {})
+                .get("application", {})
+                .get("applicationId")
+        )
+        if ALEXA_SKILL_ID and app_id != ALEXA_SKILL_ID:
+            return web.json_response({"error": "forbidden"}, status=403)
+
+        req = body.get("request", {})
+        rtype = req.get("type")
+
+        if rtype == "LaunchRequest":
+            return say("Poker table ready.")
+
+        if rtype != "IntentRequest":
+            return say("OK.")
+
+        intent = req.get("intent", {})
+        name   = intent.get("name", "")
+        slots  = intent.get("slots", {})
+
+        if name == "RebuyIntent":
+            val = slots.get("seatNumber", {}).get("value")
+            try:
+                seat = int(val)
+            except (TypeError, ValueError):
+                return say("I need a seat number, like rebuy seat four.")
+
+            if not (0 <= seat <= 9):
+                return say("Seat must be between zero and nine.")
+
+            # de-dupe
+            now  = int(time.time() * 1000)
+            last = self._last_rebuy_ts_by_seat.get(seat, 0)
+            if now - last < self._dedupe_ms:
+                return say(f"Rebuy for seat {seat} already processed.")
+            self._last_rebuy_ts_by_seat[seat] = now
+
+            payload = {
+                "command": "rebuy",
+                "seat": seat,
+                "amount": FIXED_REBUY,
+                "source": "alexaCustomSkill",
+                "ts": now
+            }
+            await self._forward_to_tablets(payload)
+            return say(f"Rebuy for seat {seat} triggered.")
+
+        # Add more intents later (NextDealerIntent, StartGameIntent, etc.)
+        return say("I didn't get that.")
 
     # ---------- role helpers ----------
     async def _set_role(self, ws, role: str):
@@ -222,14 +353,10 @@ class HubServer:
                 cmd = j.get("command")
 
                 if role == ROLE_DETECTOR:
-                    if cmd == "cards_detected":
+                    if cmd in ("cards_detected", "deal_completed"):
                         # DETECTOR -> TABLET
                         await self._forward_to_tablets(j)
-                    elif cmd == "deal_completed":
-                        await self._forward_to_tablets(j)
-                    else:
-                        # ignore or route as needed
-                        pass
+                    # else ignore
                     continue
 
                 if role == ROLE_TABLET:
@@ -303,11 +430,11 @@ class HubServer:
 # Entrypoint
 # --------------------------
 def parse_args():
-    p = argparse.ArgumentParser(description="Poker Table Hub (WebSocket <-> Serial)")
+    p = argparse.ArgumentParser(description="Poker Table Hub (WS <-> Serial) + Alexa HTTP endpoint")
     p.add_argument("--serial", help="Serial device (e.g., /dev/tty.usbmodem48CA435C84242)")
-    p.add_argument("--baud", type=int, default=int(os.getenv("BAUD", DEFAULT_BAUD)))
-    p.add_argument("--ws-host", default=os.getenv("WS_HOST", DEFAULT_WS_HOST))
-    p.add_argument("--ws-port", type=int, default=int(os.getenv("WS_PORT", DEFAULT_WS_PORT)))
+    p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
+    p.add_argument("--ws-host", default=DEFAULT_WS_HOST)
+    p.add_argument("--ws-port", type=int, default=DEFAULT_WS_PORT)
     p.add_argument("--wire", action="store_true", help="Enable wire-level logging of messages")
     p.add_argument("--debug", action="store_true", help="Enable DEBUG logging")
     return p.parse_args()
@@ -329,5 +456,8 @@ async def async_main():
     await server.start()
 
 if __name__ == "__main__":
-    asyncio.run(async_main())
+    try:
+        asyncio.run(async_main())
+    except KeyboardInterrupt:
+        pass
 

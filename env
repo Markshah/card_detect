@@ -97,3 +97,9 @@ TEST_INTERVAL_SEC=5
 
 # uses local jpg instead of camera
 TEST_ENABLE=0
+
+#for amazon poker skill
+ALEXA_SKILL_ID=amzn1.ask.skill.df6d36e1-9475-4353-b2e5-9f5939cf4981
+FIXED_REBUY_AMOUNT=20
+HTTP_BRIDGE_PORT=8787
+
