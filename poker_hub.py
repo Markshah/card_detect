@@ -287,7 +287,7 @@ class HubServer:
                 "ts": now
             }
             await self._forward_to_tablets(payload)
-            return say(f"Rebuy for seat {seat} triggered.")
+            return say(f"Rebuy for seat {seat} initiated.")
 
         # Add more intents later (NextDealerIntent, StartGameIntent, etc.)
         return say("I didn't get that.")
