@@ -246,19 +246,22 @@ class HubServer:
             except Exception:
                 pass
 
+
     async def _fulfill_seat_name_waiters(self, seat: int, name: str):
         """
         Complete any pending futures waiting for this seat's name.
         Only the earliest waiter truly needs it; we pop one by one to be safe.
         """
+
         lst = self._seat_name_waiters.get(seat)
         if not lst:
             return
-        # Resolve all current waiters (or just the first—choose all for safety)
         while lst:
             fut = lst.pop(0)
             if not fut.done():
-                fut.set_result(name)
+                fut.set_result(name)   # may be None
+
+
 
     # ---------- Alexa handler ----------
     async def _handle_alexa(self, request: web.Request) -> web.Response:
@@ -410,13 +413,16 @@ class HubServer:
                 if role == ROLE_TABLET:
                     # Special-case: seat_name replies from tablet
                     # Format expected: {"command":"seat_name","seat":N,"name":"Player Name"}
+
                     if cmd == "seat_name":
                         seat = j.get("seat")
-                        pname = (j.get("name") or "").strip()
-                        if isinstance(seat, int) and pname:
+                        raw = j.get("name")
+                        pname = (raw or "").strip()
+                        if isinstance(seat, int):
                             if self._wire:
-                                log.info("TAB→HUB seat_name seat=%s name=%s", seat, pname)
-                            await self._fulfill_seat_name_waiters(seat, pname)
+                                log.info("TAB→HUB seat_name seat=%s name=%r", seat, pname)
+                            # If empty, fulfill with None so we fall back instantly
+                            await self._fulfill_seat_name_waiters(seat, pname if pname else None)
                         # Don't forward seat_name to Serial
                         continue
 
