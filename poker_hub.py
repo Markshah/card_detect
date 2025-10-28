@@ -6,9 +6,9 @@ Poker Table Hub (Mac mini)
 
 Routing rules:
 - DETECTOR  -> TABLET only
-- TABLET    -> ARDUINO (Serial) only
+- TABLET    -> ARDUINO (Serial) only   (except special "seat_name" messages handled internally)
 - ARDUINO   -> TABLET only
-- HTTP (/alexa, POST) -> TABLET broadcast (rebuy command)
+- HTTP (/alexa, POST) -> TABLET broadcast (rebuy command), then waits briefly for seat_name
 
 Run examples:
   python poker_hub.py --serial /dev/tty.usbmodem48CA435C84242 --wire
@@ -21,12 +21,14 @@ Env (optional):
   HTTP_BRIDGE_PORT=8787
   FIXED_REBUY_AMOUNT=100
   ALEXA_SKILL_ID=amzn1.ask.skill.xxxxx...        # your exact Skill ID (recommended)
+  SEAT_NAME_TIMEOUT_MS=2500                      # optional override (default 2500 ms)
 """
 
 import asyncio, json, logging, argparse, os, sys, glob, threading, time
 import serial            # pip install pyserial
 import websockets        # pip install websockets
 from aiohttp import web  # pip install aiohttp
+from typing import Optional, List, Dict
 
 # ------------ optional dotenv ------------
 try:
@@ -46,6 +48,7 @@ DEFAULT_BAUD    = int(os.getenv("BAUD", "115200"))
 DEFAULT_HTTP_PORT     = int(os.getenv("HTTP_BRIDGE_PORT", "8787"))
 FIXED_REBUY           = int(os.getenv("FIXED_REBUY_AMOUNT", "100"))
 ALEXA_SKILL_ID        = os.getenv("ALEXA_SKILL_ID", "").strip()
+SEAT_NAME_TIMEOUT_MS  = int(os.getenv("SEAT_NAME_TIMEOUT_MS", "2500"))
 
 LOG_FORMAT = "[%(asctime)s] %(levelname)s %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
@@ -168,6 +171,9 @@ class HubServer:
         self._last_rebuy_ts_by_seat: dict[int, int] = {}
         self._dedupe_ms = 1500
 
+        # Waiters for seat-name replies (keyed by seat). Each is a list of Futures.
+        self._seat_name_waiters: Dict[int, List[asyncio.Future]] = {}
+
         # aiohttp bits
         self._http_runner: web.AppRunner | None = None
 
@@ -218,6 +224,41 @@ class HubServer:
         if self._http_runner:
             await self._http_runner.cleanup()
             self._http_runner = None
+
+    async def _wait_for_seat_name(self, seat: int, timeout_ms: int = SEAT_NAME_TIMEOUT_MS) -> Optional[str]:
+        """
+        Waits for a TABLET to send {"command":"seat_name","seat":seat,"name":"..."}.
+        Returns the name if received within timeout, else None.
+        """
+        fut: asyncio.Future = self.loop.create_future()  # type: ignore
+        self._seat_name_waiters.setdefault(seat, []).append(fut)
+        try:
+            name = await asyncio.wait_for(fut, timeout=timeout_ms / 1000.0)
+            return name  # type: ignore
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            # Clean up: remove the future if still present
+            try:
+                lst = self._seat_name_waiters.get(seat, [])
+                if fut in lst:
+                    lst.remove(fut)
+            except Exception:
+                pass
+
+    async def _fulfill_seat_name_waiters(self, seat: int, name: str):
+        """
+        Complete any pending futures waiting for this seat's name.
+        Only the earliest waiter truly needs it; we pop one by one to be safe.
+        """
+        lst = self._seat_name_waiters.get(seat)
+        if not lst:
+            return
+        # Resolve all current waiters (or just the first—choose all for safety)
+        while lst:
+            fut = lst.pop(0)
+            if not fut.done():
+                fut.set_result(name)
 
     # ---------- Alexa handler ----------
     async def _handle_alexa(self, request: web.Request) -> web.Response:
@@ -276,7 +317,10 @@ class HubServer:
             now  = int(time.time() * 1000)
             last = self._last_rebuy_ts_by_seat.get(seat, 0)
             if now - last < self._dedupe_ms:
-                return say(f"Rebuy for seat {seat} already processed.")
+                # Still try to say the player's name if we can get it quickly
+                pretty = await self._wait_for_seat_name(seat, timeout_ms=800) or f"seat {seat}"
+                return say(f"Rebuy for {pretty} already processed.")
+
             self._last_rebuy_ts_by_seat[seat] = now
 
             payload = {
@@ -286,8 +330,12 @@ class HubServer:
                 "source": "alexaCustomSkill",
                 "ts": now
             }
+            # Send to tablets first
             await self._forward_to_tablets(payload)
-            return say(f"Rebuy for seat {seat} initiated.")
+
+            # Then wait briefly for the tablet's "seat_name" echo
+            pretty = await self._wait_for_seat_name(seat) or f"seat {seat}"
+            return say(f"Rebuy for {pretty} initiated.")
 
         # Add more intents later (NextDealerIntent, StartGameIntent, etc.)
         return say("I didn't get that.")
@@ -360,6 +408,18 @@ class HubServer:
                     continue
 
                 if role == ROLE_TABLET:
+                    # Special-case: seat_name replies from tablet
+                    # Format expected: {"command":"seat_name","seat":N,"name":"Player Name"}
+                    if cmd == "seat_name":
+                        seat = j.get("seat")
+                        pname = (j.get("name") or "").strip()
+                        if isinstance(seat, int) and pname:
+                            if self._wire:
+                                log.info("TAB→HUB seat_name seat=%s name=%s", seat, pname)
+                            await self._fulfill_seat_name_waiters(seat, pname)
+                        # Don't forward seat_name to Serial
+                        continue
+
                     # TABLET -> ARDUINO (Serial) only
                     self.sb.write_line(json.dumps(j, separators=(",", ":")))
                     continue
