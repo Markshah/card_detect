@@ -19,7 +19,8 @@ Env (optional):
   WS_PORT=8888
   BAUD=115200
   HTTP_BRIDGE_PORT=8787
-  FIXED_REBUY_AMOUNT=100
+  FIXED_REBUY_AMOUNT=20
+  FIXED_HALF_REBUY_AMOUNT=10
   ALEXA_SKILL_ID=amzn1.ask.skill.xxxxx...        # your exact Skill ID (recommended)
   SEAT_NAME_TIMEOUT_MS=2500                      # optional override (default 2500 ms)
 """
@@ -46,13 +47,17 @@ DEFAULT_WS_PORT = int(os.getenv("WS_PORT", "8888"))
 DEFAULT_BAUD    = int(os.getenv("BAUD", "115200"))
 
 DEFAULT_HTTP_PORT     = int(os.getenv("HTTP_BRIDGE_PORT", "8787"))
-FIXED_REBUY           = int(os.getenv("FIXED_REBUY_AMOUNT", "100"))
+FIXED_REBUY           = int(os.getenv("FIXED_REBUY_AMOUNT", "20"))
+FIXED_HALF_REBUY      = int(os.getenv("FIXED_HALF_REBUY_AMOUNT", "10"))
 ALEXA_SKILL_ID        = os.getenv("ALEXA_SKILL_ID", "").strip()
 SEAT_NAME_TIMEOUT_MS  = int(os.getenv("SEAT_NAME_TIMEOUT_MS", "2500"))
 
 LOG_FORMAT = "[%(asctime)s] %(levelname)s %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 log = logging.getLogger("poker_hub")
+
+RED = "\033[91m"
+RESET = "\033[0m"
 
 def trunc(s: str, n: int = 220) -> str:
     s = s.replace("\n", "\\n")
@@ -73,7 +78,7 @@ class SerialBridge:
     - reader thread parses lines and enqueues them onto an asyncio.Queue
       using loop.call_soon_threadsafe(...)   <-- thread-safe!
     """
-    def __init__(self, port: str, baud: int, out_queue: asyncio.Queue, wire: bool = False):
+    def __init__(self, port: Optional[str], baud: int, out_queue: asyncio.Queue, wire: bool = False):
         self.port = port
         self.baud = baud
         self.q = out_queue
@@ -82,8 +87,12 @@ class SerialBridge:
         self._stop = threading.Event()
         self._thr = None
         self._wire = wire
+        self._warned_no_serial = False
 
     def open(self):
+        if not self.port:
+            log.warning(f"{RED}⚠️  No serial device specified/found. Continuing without Arduino.{RESET}")
+            return
         log.info(f"Opening serial: {self.port} @ {self.baud}")
         try:
             self.ser = serial.Serial(self.port, self.baud, timeout=0.2, write_timeout=1.0)
@@ -92,8 +101,7 @@ class SerialBridge:
             self._thr = threading.Thread(target=self._reader_loop, name="serial-reader", daemon=True)
             self._thr.start()
             log.info("Serial opened.")
-        except serial.SerialException as e:
-            RED = "\033[91m"; RESET = "\033[0m"
+        except Exception as e:  # broader than SerialException so we never crash here
             log.warning(f"{RED}⚠️  Could not open serial port {self.port}: {e}{RESET}")
             log.warning(f"{RED}Continuing without Arduino (Hub will still serve WS clients).{RESET}")
             self.ser = None
@@ -111,6 +119,9 @@ class SerialBridge:
 
     def write_line(self, s: str):
         if not self.ser:
+            if not self._warned_no_serial:
+                log.warning(f"{RED}⚠️  Arduino serial unavailable; dropping message to Serial. Is the UNO R4 connected?{RESET}")
+                self._warned_no_serial = True
             return
         if not s.endswith("\n"):
             s = s + "\n"
@@ -119,7 +130,7 @@ class SerialBridge:
             if self._wire:
                 log.info("WS→SER  %s", trunc(s.strip()))
         except Exception as e:
-            log.warning(f"Serial write failed: {e!r}")
+            log.warning(f"{RED}Serial write failed: {e!r}{RESET}")
 
     def _reader_loop(self):
         buf = bytearray()
@@ -145,7 +156,7 @@ class SerialBridge:
                 else:
                     time.sleep(0.01)
             except Exception as e:
-                log.warning(f"Serial read error: {e!r}")
+                log.warning(f"{RED}Serial read error: {e!r}{RESET}")
                 time.sleep(0.2)
 
 # --------------------------
@@ -183,7 +194,7 @@ class HubServer:
         self.sb.q = self.serial_to_ws_q
         self.sb.loop = self.loop
 
-        # Start serial
+        # Start serial (non-fatal if missing)
         self.sb.open()
 
         # Start serial→tablet broadcaster
@@ -226,10 +237,6 @@ class HubServer:
             self._http_runner = None
 
     async def _wait_for_seat_name(self, seat: int, timeout_ms: int = SEAT_NAME_TIMEOUT_MS) -> Optional[str]:
-        """
-        Waits for a TABLET to send {"command":"seat_name","seat":seat,"name":"..."}.
-        Returns the name if received within timeout, else None.
-        """
         fut: asyncio.Future = self.loop.create_future()  # type: ignore
         self._seat_name_waiters.setdefault(seat, []).append(fut)
         try:
@@ -238,7 +245,6 @@ class HubServer:
         except asyncio.TimeoutError:
             return None
         finally:
-            # Clean up: remove the future if still present
             try:
                 lst = self._seat_name_waiters.get(seat, [])
                 if fut in lst:
@@ -247,14 +253,9 @@ class HubServer:
                 pass
 
     async def _fulfill_seat_name_waiters(self, seat: int, name: str):
-        """
-        Complete any pending futures waiting for this seat's name.
-        Only the earliest waiter truly needs it; we pop one by one to be safe.
-        """
         lst = self._seat_name_waiters.get(seat)
         if not lst:
             return
-        # Resolve all current waiters (or just the first—choose all for safety)
         while lst:
             fut = lst.pop(0)
             if not fut.done():
@@ -262,7 +263,6 @@ class HubServer:
 
     # ---------- Alexa handler ----------
     async def _handle_alexa(self, request: web.Request) -> web.Response:
-        """Minimal Alexa Custom Skill handler (RebuyIntent seatNumber)."""
         def say(text: str):
             return web.json_response({
                 "version": "1.0",
@@ -303,7 +303,8 @@ class HubServer:
         name   = intent.get("name", "")
         slots  = intent.get("slots", {})
 
-        if name == "RebuyIntent":
+        # ----- RebuyIntent / RebuyHalfIntent -----
+        if name in ("RebuyIntent", "RebuyHalfIntent"):
             val = slots.get("seatNumber", {}).get("value")
             try:
                 seat = int(val)
@@ -313,29 +314,33 @@ class HubServer:
             if not (0 <= seat <= 9):
                 return say("Seat must be between zero and nine.")
 
-            # de-dupe
             now  = int(time.time() * 1000)
             last = self._last_rebuy_ts_by_seat.get(seat, 0)
             if now - last < self._dedupe_ms:
-                # Still try to say the player's name if we can get it quickly
                 pretty = await self._wait_for_seat_name(seat, timeout_ms=800) or f"seat {seat}"
-                return say(f"Rebuy for {pretty} already processed.")
+                return say(f"{'Half rebuy' if name == 'RebuyHalfIntent' else 'Rebuy'} for {pretty} already processed.")
 
             self._last_rebuy_ts_by_seat[seat] = now
 
+            if name == "RebuyHalfIntent":
+                amount = FIXED_HALF_REBUY
+                command = "half_rebuy"
+            else:
+                amount = FIXED_REBUY
+                command = "rebuy"
+
             payload = {
-                "command": "rebuy",
+                "command": command,
                 "seat": seat,
-                "amount": FIXED_REBUY,
+                "amount": amount,
                 "source": "alexaCustomSkill",
                 "ts": now
             }
-            # Send to tablets first
             await self._forward_to_tablets(payload)
 
-            # Then wait briefly for the tablet's "seat_name" echo
             pretty = await self._wait_for_seat_name(seat) or f"seat {seat}"
-            return say(f"Rebuy for {pretty} initiated.")
+            phrase = "Half rebuy" if name == "RebuyHalfIntent" else "Rebuy"
+            return say(f"{phrase} for {pretty} initiated.")
 
         # Add more intents later (NextDealerIntent, StartGameIntent, etc.)
         return say("I didn't get that.")
@@ -374,7 +379,6 @@ class HubServer:
                 try:
                     j = json.loads(text)
                 except json.JSONDecodeError:
-                    # ignore non-JSON
                     continue
 
                 # Hello sets role explicitly
@@ -402,14 +406,10 @@ class HubServer:
 
                 if role == ROLE_DETECTOR:
                     if cmd in ("cards_detected", "deal_completed"):
-                        # DETECTOR -> TABLET
                         await self._forward_to_tablets(j)
-                    # else ignore
                     continue
 
                 if role == ROLE_TABLET:
-                    # Special-case: seat_name replies from tablet
-                    # Format expected: {"command":"seat_name","seat":N,"name":"Player Name"}
                     if cmd == "seat_name":
                         seat = j.get("seat")
                         pname = (j.get("name") or "").strip()
@@ -417,7 +417,6 @@ class HubServer:
                             if self._wire:
                                 log.info("TAB→HUB seat_name seat=%s name=%s", seat, pname)
                             await self._fulfill_seat_name_waiters(seat, pname)
-                        # Don't forward seat_name to Serial
                         continue
 
                     # TABLET -> ARDUINO (Serial) only
@@ -436,10 +435,8 @@ class HubServer:
             log.info(f"Client disconnected: {peer}")
 
     def _infer_role_from_message(self, j: dict) -> str:
-        # Treat detector-originated signals as detector for correct routing
         if j.get("command") in ("cards_detected", "deal_completed"):
             return ROLE_DETECTOR
-        # If it's a control (e.g., move_dealer_forward) and came from WS, treat as tablet by default
         return ROLE_TABLET
 
     # ---------- Broadcast helpers ----------
@@ -464,7 +461,6 @@ class HubServer:
         """Serial → TABLET only."""
         while True:
             line = await self.serial_to_ws_q.get()
-            # sanity: only forward JSON-looking lines
             try:
                 _ = json.loads(line)
             except json.JSONDecodeError:
@@ -506,9 +502,9 @@ async def async_main():
 
     port = args.serial or os.getenv("SERIAL_PORT") or auto_find_serial()
     if not port:
-        log.error("No serial device found. Plug in the UNO R4 or pass --serial /dev/tty.usbmodemXXXX")
-        sys.exit(2)
-    log.info(f"Using serial device: {port}")
+        log.warning(f"{RED}⚠️  No serial device found. Hub will start without Arduino Serial.{RESET}")
+    else:
+        log.info(f"Using serial device: {port}")
 
     dummy_q = asyncio.Queue()
     sb = SerialBridge(port, args.baud, dummy_q, wire=args.wire)
