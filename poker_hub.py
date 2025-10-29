@@ -237,6 +237,12 @@ class HubServer:
             self._http_runner = None
 
     async def _wait_for_seat_name(self, seat: int, timeout_ms: int = SEAT_NAME_TIMEOUT_MS) -> Optional[str]:
+        """
+        Returns:
+          - str with player name (non-empty) if tablet reports it
+          - "" (empty string) if tablet reports no one seated at that seat
+          - None on timeout/no reply
+        """
         fut: asyncio.Future = self.loop.create_future()  # type: ignore
         self._seat_name_waiters.setdefault(seat, []).append(fut)
         try:
@@ -317,7 +323,15 @@ class HubServer:
             now  = int(time.time() * 1000)
             last = self._last_rebuy_ts_by_seat.get(seat, 0)
             if now - last < self._dedupe_ms:
-                pretty = await self._wait_for_seat_name(seat, timeout_ms=800) or f"seat {seat}"
+                # Recent duplicate — still try to speak a helpful name if possible
+                result = await self._wait_for_seat_name(seat, timeout_ms=800)
+
+                if self._wire:
+                    log.info("ALEXA duplicate window: seat=%d name_result=%r", seat, result)
+
+                if result == "":
+                    return say(f"No one is seated at seat {seat}.")
+                pretty = result or f"seat {seat}"
                 return say(f"{'Half rebuy' if name == 'RebuyHalfIntent' else 'Rebuy'} for {pretty} already processed.")
 
             self._last_rebuy_ts_by_seat[seat] = now
@@ -336,9 +350,22 @@ class HubServer:
                 "source": "alexaCustomSkill",
                 "ts": now
             }
+
+            if self._wire:
+                log.info("ALEXA→TAB sending rebuy payload: %s", trunc(json.dumps(payload, separators=(',', ':'))))
+
             await self._forward_to_tablets(payload)
 
-            pretty = await self._wait_for_seat_name(seat) or f"seat {seat}"
+            # Wait for a seat_name response from the tablet
+            result = await self._wait_for_seat_name(seat)
+
+            if self._wire:
+                state = "timeout(None)" if result is None else ("blank('')" if result == "" else f"name({result!r})")
+                log.info("ALEXA seat_name result for seat %d: %s", seat, state)
+
+            if result == "":
+                return say(f"No one is seated at seat {seat}.")
+            pretty = result or f"seat {seat}"
             phrase = "Half rebuy" if name == "RebuyHalfIntent" else "Rebuy"
             return say(f"{phrase} for {pretty} initiated.")
 
@@ -412,10 +439,13 @@ class HubServer:
                 if role == ROLE_TABLET:
                     if cmd == "seat_name":
                         seat = j.get("seat")
-                        pname = (j.get("name") or "").strip()
-                        if isinstance(seat, int) and pname:
+                        # Accept blank names to explicitly indicate "no one seated"
+                        pname_raw = j.get("name")
+                        pname = "" if pname_raw is None else str(pname_raw).strip()
+                        if isinstance(seat, int):
                             if self._wire:
-                                log.info("TAB→HUB seat_name seat=%s name=%s", seat, pname)
+                                log.info("TAB→HUB seat_name seat=%s name=%r", seat, pname)
+                            # Fulfill waiters even if blank string
                             await self._fulfill_seat_name_waiters(seat, pname)
                         continue
 
@@ -467,8 +497,11 @@ class HubServer:
                 continue
 
             tablets = await self._clients_with_role(ROLE_TABLET)
-            if self._wire and tablets:
-                log.info("HUB→TAB x%d %s", len(tablets), trunc(line))
+            if self._wire:
+                if tablets:
+                    log.info("HUB→TAB x%d %s", len(tablets), trunc(line))
+                else:
+                    log.info("HUB→TAB x0 (no tablet connected) %s", trunc(line))
 
             dead = []
             for ws in tablets:
