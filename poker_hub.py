@@ -8,7 +8,7 @@ Routing rules:
 - DETECTOR  -> TABLET only
 - TABLET    -> ARDUINO (Serial) only   (except special "seat_name" messages handled internally)
 - ARDUINO   -> TABLET only
-- HTTP (/alexa, POST) -> TABLET broadcast (rebuy command), then waits briefly for seat_name
+- HTTP (/alexa, POST) -> TABLET broadcast (rebuy/stand/sit), then waits briefly for seat_name
 
 Run examples:
   python poker_hub.py --serial /dev/tty.usbmodem48CA435C84242 --wire
@@ -51,6 +51,9 @@ FIXED_REBUY           = int(os.getenv("FIXED_REBUY_AMOUNT", "20"))
 FIXED_HALF_REBUY      = int(os.getenv("FIXED_HALF_REBUY_AMOUNT", "10"))
 ALEXA_SKILL_ID        = os.getenv("ALEXA_SKILL_ID", "").strip()
 SEAT_NAME_TIMEOUT_MS  = int(os.getenv("SEAT_NAME_TIMEOUT_MS", "2500"))
+
+SEAT_MAX = int(os.getenv("SEAT_MAX", "9"))  # valid seats are 0..SEAT_MAX (inclusive)
+
 
 LOG_FORMAT = "[%(asctime)s] %(levelname)s %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
@@ -267,6 +270,29 @@ class HubServer:
             if not fut.done():
                 fut.set_result(name)
 
+    # ---------- seat helpers ----------
+    def _parse_seat_from_slots(self, slots) -> tuple[bool, Optional[int], Optional[str]]:
+        """
+        Returns (ok, seat, error_message_for_alexa)
+        ok=False if seat missing/invalid; error_message_for_alexa is a friendly string.
+        """
+        val = None
+        try:
+            val = slots.get("seatNumber", {}).get("value")
+        except Exception:
+            pass
+
+        try:
+            seat = int(val)
+        except (TypeError, ValueError):
+            return False, None, "I need a seat number, like seat four."
+
+        if not (0 <= seat <= SEAT_MAX):
+            # say exact valid range in case SEAT_MAX differs from 9
+            return False, None, f"Seat must be between zero and {SEAT_MAX}."
+
+        return True, seat, None
+
     # ---------- Alexa handler ----------
     async def _handle_alexa(self, request: web.Request) -> web.Response:
         def say(text: str):
@@ -311,24 +337,16 @@ class HubServer:
 
         # ----- RebuyIntent / RebuyHalfIntent -----
         if name in ("RebuyIntent", "RebuyHalfIntent"):
-            val = slots.get("seatNumber", {}).get("value")
-            try:
-                seat = int(val)
-            except (TypeError, ValueError):
-                return say("I need a seat number, like rebuy seat four.")
-
-            if not (0 <= seat <= 9):
-                return say("Seat must be between zero and nine.")
+            ok, seat, err = self._parse_seat_from_slots(slots)
+            if not ok:
+                return say(err)
 
             now  = int(time.time() * 1000)
             last = self._last_rebuy_ts_by_seat.get(seat, 0)
             if now - last < self._dedupe_ms:
-                # Recent duplicate — still try to speak a helpful name if possible
                 result = await self._wait_for_seat_name(seat, timeout_ms=800)
-
                 if self._wire:
                     log.info("ALEXA duplicate window: seat=%d name_result=%r", seat, result)
-
                 if result == "":
                     return say(f"No one is seated at seat {seat}.")
                 pretty = result or f"seat {seat}"
@@ -350,15 +368,11 @@ class HubServer:
                 "source": "alexaCustomSkill",
                 "ts": now
             }
-
             if self._wire:
                 log.info("ALEXA→TAB sending rebuy payload: %s", trunc(json.dumps(payload, separators=(',', ':'))))
-
             await self._forward_to_tablets(payload)
 
-            # Wait for a seat_name response from the tablet
             result = await self._wait_for_seat_name(seat)
-
             if self._wire:
                 state = "timeout(None)" if result is None else ("blank('')" if result == "" else f"name({result!r})")
                 log.info("ALEXA seat_name result for seat %d: %s", seat, state)
@@ -368,6 +382,36 @@ class HubServer:
             pretty = result or f"seat {seat}"
             phrase = "Half rebuy" if name == "RebuyHalfIntent" else "Rebuy"
             return say(f"{phrase} for {pretty} initiated.")
+
+        # ----- StandupIntent / SitDownIntent -----
+        if name in ("StandupIntent", "SitDownIntent"):
+            ok, seat, err = self._parse_seat_from_slots(slots)
+            if not ok:
+                return say(err)
+
+            is_sitting = (name == "SitDownIntent")
+            payload = {
+                "command": "set_sitting",
+                "seat": seat,
+                "is_sitting": is_sitting,
+                "source": "alexaCustomSkill",
+                "ts": int(time.time() * 1000)
+            }
+            if self._wire:
+                log.info("ALEXA→TAB sending set_sitting payload: %s", trunc(json.dumps(payload, separators=(',', ':'))))
+            await self._forward_to_tablets(payload)
+
+            # Try to personalize with a name
+            result = await self._wait_for_seat_name(seat, timeout_ms=1200)
+
+            # If the tablet explicitly reported no one at that seat
+            if result == "":
+                return say(f"No one is seated at seat {seat}.")
+
+            # If no reply, fall back to the seat number; else use the name
+            pretty = result or f"seat {seat}"
+            return say(f"{pretty} is now marked as {'playing' if is_sitting else 'not playing'}.")
+
 
         # Add more intents later (NextDealerIntent, StartGameIntent, etc.)
         return say("I didn't get that.")
