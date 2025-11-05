@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Kill poker_hub, card_detect, and cloudflared processes,
-# then close ONLY the Terminal windows running poker_hub/card_detect.
+# then close ALL Terminal windows running these processes.
 # Works on macOS default Bash 3.2 (no mapfile).
 
 echo "🛑 Stopping Poker Hub, Card Detector, and Cloudflare Tunnel..."
@@ -33,14 +33,14 @@ tunnel_pids="$(collect_pids 'cloudflared.*tunnel.*pokerhub')"
 # Kill all three kinds
 kill_grace $hub_pids $det_pids $tunnel_pids
 
-# 2) Close ONLY windows for hub & detector (leave tunnel window open)
+# 2) Close ALL windows for hub, detector, and tunnel
 #    We match by:
-#      - tab contents containing "poker_hub.py" or "card_detect.py"
-#      - OR the window/tab name containing "PokerHub" or "CardDetector" (from startup titles)
-#      - OR the contents containing our header lines "=== POKER HUB ===" / "=== CARD DETECTOR ==="
+#      - tab contents containing "poker_hub.py", "card_detect.py", or "cloudflared"
+#      - OR the window/tab name containing "PokerHub", "CardDetector", or "CloudflareTunnel" (from startup titles)
+#      - OR the contents containing our header lines "=== POKER HUB ===", "=== CARD DETECTOR ===", or "=== CLOUDFLARE TUNNEL ==="
 osascript <<'APPLESCRIPT'
 tell application "Terminal"
-  set targets to {"poker_hub.py", "card_detect.py", "=== POKER HUB ===", "=== CARD DETECTOR ===", "PokerHub", "CardDetector"}
+  set targets to {"poker_hub.py", "card_detect.py", "cloudflared", "=== POKER HUB ===", "=== CARD DETECTOR ===", "=== CLOUDFLARE TUNNEL ===", "PokerHub", "CardDetector", "CloudflareTunnel"}
   set windowsToClose to {}
 
   repeat with w in windows
@@ -97,5 +97,5 @@ end tell
 APPLESCRIPT
 
 echo "✅ Killed poker_hub.py, card_detect.py, cloudflared."
-echo "✅ Closed only the poker_hub/card_detect Terminal windows; tunnel window left open."
+echo "✅ Closed all Terminal windows running these processes."
 
