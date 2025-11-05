@@ -184,6 +184,9 @@ class HubServer:
 
         # Waiters for seat-name replies (keyed by seat)
         self._seat_name_waiters: Dict[int, List[asyncio.Future]] = {}
+        
+        # Waiters for player_not_found responses (keyed by player name)
+        self._player_not_found_waiters: Dict[str, List[asyncio.Future]] = {}
 
         self._http_runner: web.AppRunner | None = None
 
@@ -253,6 +256,33 @@ class HubServer:
             fut = lst.pop(0)
             if not fut.done():
                 fut.set_result(name)
+    
+    async def _wait_for_player_not_found(self, player_name: str, timeout_ms: int = 1000) -> bool:
+        """Wait for player_not_found response. Returns True if player not found, False if timeout."""
+        fut: asyncio.Future = self.loop.create_future()  # type: ignore
+        self._player_not_found_waiters.setdefault(player_name.lower(), []).append(fut)
+        try:
+            result = await asyncio.wait_for(fut, timeout=timeout_ms / 1000.0)
+            return result  # type: ignore
+        except asyncio.TimeoutError:
+            return False
+        finally:
+            try:
+                lst = self._player_not_found_waiters.get(player_name.lower(), [])
+                if fut in lst:
+                    lst.remove(fut)
+            except Exception:
+                pass
+    
+    async def _fulfill_player_not_found_waiters(self, player_name: str):
+        """Notify waiters that a player was not found."""
+        lst = self._player_not_found_waiters.get(player_name.lower())
+        if not lst:
+            return
+        while lst:
+            fut = lst.pop(0)
+            if not fut.done():
+                fut.set_result(True)
 
     # ---------- seat & chips helpers ----------
     def _parse_seat_from_slots(self, slots) -> tuple[bool, Optional[int], Optional[str]]:
@@ -406,12 +436,14 @@ class HubServer:
                 log.info("ALEXA→TAB sending rebuy payload: %s", trunc(json.dumps(payload, separators=(',', ':'))))
             await self._forward_to_tablets(payload)
 
-            # For name-based requests, wait for seat_name response to personalize
+            # For name-based requests, wait for seat_name or player_not_found response
             if ok_name and pname:
-                # Android will send seat_name after processing
-                # We'll wait a bit to get the seat for the response
-                await asyncio.sleep(0.3)  # Give Android time to process and respond
-                # Note: We don't have a way to wait for name-based seat_name, so just use the name
+                # Check if player was not found
+                not_found = await self._wait_for_player_not_found(pname, timeout_ms=500)
+                if not_found:
+                    return say(f"{pname} isn't playing at the table.")
+                # If found, wait a bit for seat_name response
+                await asyncio.sleep(0.2)
                 pretty = pname
             elif ok_seat:
                 result = await self._wait_for_seat_name(seat)
@@ -452,13 +484,18 @@ class HubServer:
                 log.info("ALEXA→TAB sending set_sitting payload: %s", trunc(json.dumps(payload, separators=(',', ':'))))
             await self._forward_to_tablets(payload)
 
-            if ok_seat:
+            if ok_name and pname:
+                not_found = await self._wait_for_player_not_found(pname, timeout_ms=500)
+                if not_found:
+                    return say(f"{pname} isn't playing at the table.")
+                pretty = pname
+            elif ok_seat:
                 result = await self._wait_for_seat_name(seat, timeout_ms=1200)
                 if result == "":
                     return say(f"No one is seated at seat {seat}.")
                 pretty = result or f"seat {seat}"
             else:
-                pretty = pname or "player"
+                pretty = "player"
 
             return say(f"{pretty} is now marked as {'playing' if is_sitting else 'not playing'}.")
 
@@ -491,7 +528,12 @@ class HubServer:
                 log.info("ALEXA→TAB sending final_chips payload: %s", trunc(json.dumps(payload, separators=(',', ':'))))
             await self._forward_to_tablets(payload)
 
-            if ok_seat:
+            if ok_name and pname:
+                not_found = await self._wait_for_player_not_found(pname, timeout_ms=500)
+                if not_found:
+                    return say(f"{pname} isn't playing at the table.")
+                pretty = pname
+            elif ok_seat:
                 result = await self._wait_for_seat_name(seat, timeout_ms=1200)
                 if self._wire:
                     state = "timeout(None)" if result is None else ("blank('')" if result == "" else f"name({result!r})")
@@ -500,7 +542,7 @@ class HubServer:
                     return say(f"No one is seated at seat {seat}.")
                 pretty = result or f"seat {seat}"
             else:
-                pretty = pname or "player"
+                pretty = "player"
 
             return say(f"Recorded final chips for {pretty}: {chips} dollars.")
 
@@ -530,13 +572,18 @@ class HubServer:
                          trunc(json.dumps(payload, separators=(',', ':'))))
             await self._forward_to_tablets(payload)
 
-            if ok_seat:
+            if ok_name and pname:
+                not_found = await self._wait_for_player_not_found(pname, timeout_ms=500)
+                if not_found:
+                    return say(f"{pname} isn't playing at the table.")
+                pretty = pname
+            elif ok_seat:
                 result = await self._wait_for_seat_name(seat, timeout_ms=1200)
                 if result == "":
                     return say(f"No one is seated at seat {seat}.")
                 pretty = result or f"seat {seat}"
             else:
-                pretty = pname or "player"
+                pretty = "player"
 
             return say(f"{pretty} recorded as the change round winner.")
 
@@ -611,6 +658,14 @@ class HubServer:
                             if self._wire:
                                 log.info("TAB→HUB seat_name seat=%s name=%r", seat, pname)
                             await self._fulfill_seat_name_waiters(seat, pname)
+                        continue
+                    
+                    if cmd == "player_not_found":
+                        player_name = j.get("player_name", "")
+                        if player_name:
+                            if self._wire:
+                                log.info("TAB→HUB player_not_found player_name=%r", player_name)
+                            await self._fulfill_player_not_found_waiters(player_name)
                         continue
 
                     # TABLET -> ARDUINO (Serial) only
