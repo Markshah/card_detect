@@ -185,6 +185,9 @@ class HubServer:
         # Waiters for seat-name replies (keyed by seat)
         self._seat_name_waiters: Dict[int, List[asyncio.Future]] = {}
         
+        # Waiters for seat-name replies by player name (keyed by normalized name)
+        self._seat_name_by_name_waiters: Dict[str, List[asyncio.Future]] = {}
+        
         # Waiters for player_not_found responses (keyed by player name)
         self._player_not_found_waiters: Dict[str, List[asyncio.Future]] = {}
 
@@ -232,14 +235,15 @@ class HubServer:
             await self._http_runner.cleanup()
             self._http_runner = None
 
-    async def _wait_for_seat_name(self, seat: int, timeout_ms: int = SEAT_NAME_TIMEOUT_MS) -> Optional[str]:
+    async def _wait_for_seat_name(self, seat: int, timeout_ms: int = SEAT_NAME_TIMEOUT_MS) -> tuple[Optional[str], Optional[int]]:
+        """Wait for seat_name response. Returns (name, total_rebuys) tuple."""
         fut: asyncio.Future = self.loop.create_future()  # type: ignore
         self._seat_name_waiters.setdefault(seat, []).append(fut)
         try:
-            name = await asyncio.wait_for(fut, timeout=timeout_ms / 1000.0)
-            return name  # type: ignore
+            result = await asyncio.wait_for(fut, timeout=timeout_ms / 1000.0)
+            return result  # type: ignore
         except asyncio.TimeoutError:
-            return None
+            return (None, None)
         finally:
             try:
                 lst = self._seat_name_waiters.get(seat, [])
@@ -248,14 +252,61 @@ class HubServer:
             except Exception:
                 pass
 
-    async def _fulfill_seat_name_waiters(self, seat: int, name: str):
+    async def _fulfill_seat_name_waiters(self, seat: int, name: str, total_rebuys: Optional[int] = None, waiter_name: Optional[str] = None):
+        """Fulfill waiters with (name, total_rebuys) tuple.
+        
+        Args:
+            seat: Seat number
+            name: Display name (returned to caller)
+            total_rebuys: Total rebuys amount
+            waiter_name: Name to use for matching waiters (usually the matched name from Alexa)
+        """
+        # Fulfill seat-based waiters
         lst = self._seat_name_waiters.get(seat)
-        if not lst:
-            return
-        while lst:
-            fut = lst.pop(0)
-            if not fut.done():
-                fut.set_result(name)
+        if lst:
+            while lst:
+                fut = lst.pop(0)
+                if not fut.done():
+                    fut.set_result((name, total_rebuys))
+        
+        # Fulfill name-based waiters (use waiter_name if provided, otherwise use display name)
+        name_for_matching = waiter_name if waiter_name else name
+        if name_for_matching:
+            normalized_name = name_for_matching.strip().lower()
+            log.info("Looking for name-based waiters with normalized name: '%s' (from waiter_name=%r, name=%r)", 
+                    normalized_name, waiter_name, name)
+            name_lst = self._seat_name_by_name_waiters.get(normalized_name)
+            if name_lst:
+                log.info("Found %d waiter(s) for name '%s', fulfilling...", len(name_lst), normalized_name)
+                while name_lst:
+                    fut = name_lst.pop(0)
+                    if not fut.done():
+                        fut.set_result((name, total_rebuys))
+                        log.info("Fulfilled waiter for name '%s' with name=%r, total_rebuys=%r", normalized_name, name, total_rebuys)
+            else:
+                log.warning("No waiters found for normalized name '%s'. Active waiters: %s", 
+                           normalized_name, list(self._seat_name_by_name_waiters.keys()))
+    
+    async def _wait_for_seat_name_by_name(self, player_name: str, timeout_ms: int = SEAT_NAME_TIMEOUT_MS) -> tuple[Optional[str], Optional[int]]:
+        """Wait for seat_name response by player name. Returns (name, total_rebuys) tuple."""
+        normalized_name = player_name.strip().lower()
+        log.info("Setting up waiter for seat_name by name: '%s' (normalized: '%s')", player_name, normalized_name)
+        fut: asyncio.Future = self.loop.create_future()  # type: ignore
+        self._seat_name_by_name_waiters.setdefault(normalized_name, []).append(fut)
+        try:
+            result = await asyncio.wait_for(fut, timeout=timeout_ms / 1000.0)
+            log.info("Waiter fulfilled for name '%s': name=%r, total_rebuys=%r", normalized_name, result[0], result[1])
+            return result  # type: ignore
+        except asyncio.TimeoutError:
+            log.warning("Waiter timed out for name '%s' after %dms", normalized_name, timeout_ms)
+            return (None, None)
+        finally:
+            try:
+                lst = self._seat_name_by_name_waiters.get(normalized_name, [])
+                if fut in lst:
+                    lst.remove(fut)
+            except Exception:
+                pass
     
     async def _wait_for_player_not_found(self, player_name: str, timeout_ms: int = 1000) -> bool:
         """Wait for player_not_found response. Returns True if player not found, False if timeout."""
@@ -421,12 +472,12 @@ class HubServer:
                 # Check dedupe window for seat-based requests
                 last = self._last_rebuy_ts_by_seat.get(seat, 0)
                 if now - last < self._dedupe_ms:
-                    result = await self._wait_for_seat_name(seat, timeout_ms=800)
+                    result_name, _ = await self._wait_for_seat_name(seat, timeout_ms=800)
                     if self._wire:
-                        log.info("ALEXA duplicate window: seat=%d name_result=%r", seat, result)
-                    if result == "":
+                        log.info("ALEXA duplicate window: seat=%d name_result=%r", seat, result_name)
+                    if result_name == "":
                         return say(f"No one is seated at seat {seat}.")
-                    pretty = result or f"seat {seat}"
+                    pretty = result_name or f"seat {seat}"
                     return say(f"{'Half rebuy' if name == 'RebuyHalfIntent' else 'Rebuy'} for {pretty} already processed.")
                 self._last_rebuy_ts_by_seat[seat] = now
             else:
@@ -434,30 +485,50 @@ class HubServer:
 
             if self._wire:
                 log.info("ALEXA→TAB sending rebuy payload: %s", trunc(json.dumps(payload, separators=(',', ':'))))
+            
+            # For name-based requests, set up waiters BEFORE sending (so we don't miss fast responses)
+            total_rebuys = None
+            if ok_name and pname:
+                # Set up waiter for seat_name response (before sending command)
+                seat_name_task = asyncio.create_task(self._wait_for_seat_name_by_name(pname, timeout_ms=2000))
+                player_not_found_task = asyncio.create_task(self._wait_for_player_not_found(pname, timeout_ms=500))
+            
             await self._forward_to_tablets(payload)
 
             # For name-based requests, wait for seat_name or player_not_found response
             if ok_name and pname:
-                # Check if player was not found
-                not_found = await self._wait_for_player_not_found(pname, timeout_ms=500)
+                # Wait for player_not_found first (shorter timeout)
+                not_found = await player_not_found_task
                 if not_found:
+                    seat_name_task.cancel()  # Cancel the other waiter
                     return say(f"{pname} isn't playing at the table.")
-                # If found, wait a bit for seat_name response
-                await asyncio.sleep(0.2)
-                pretty = pname
-            elif ok_seat:
-                result = await self._wait_for_seat_name(seat)
+                # If found, wait for seat_name response to get total_rebuys
+                # The tablet will resolve the name to a seat and send seat_name back
+                result_name, result_total_rebuys = await seat_name_task
                 if self._wire:
-                    state = "timeout(None)" if result is None else ("blank('')" if result == "" else f"name({result!r})")
-                    log.info("ALEXA seat_name result for seat %d: %s", seat, state)
-                if result == "":
+                    state = "timeout(None)" if result_name is None else ("blank('')" if result_name == "" else f"name({result_name!r})")
+                    log.info("ALEXA seat_name result for name '%s': %s total_rebuys=%r", pname, state, result_total_rebuys)
+                # Use the original name Alexa sent (pname), not the display name (result_name)
+                # This ensures Alexa says back the same name/nickname that was used in the request
+                pretty = pname
+                total_rebuys = result_total_rebuys
+            elif ok_seat:
+                result_name, result_total_rebuys = await self._wait_for_seat_name(seat)
+                if self._wire:
+                    state = "timeout(None)" if result_name is None else ("blank('')" if result_name == "" else f"name({result_name!r})")
+                    log.info("ALEXA seat_name result for seat %d: %s total_rebuys=%r", seat, state, result_total_rebuys)
+                if result_name == "":
                     return say(f"No one is seated at seat {seat}.")
-                pretty = result or f"seat {seat}"
+                pretty = result_name or f"seat {seat}"
+                total_rebuys = result_total_rebuys
             else:
                 pretty = "player"
 
             phrase = "Half rebuy" if name == "RebuyHalfIntent" else "Rebuy"
-            return say(f"{phrase} for {pretty} initiated.")
+            if total_rebuys is not None:
+                return say(f"{phrase} for {pretty} initiated. {pretty} now owes {total_rebuys} dollars.")
+            else:
+                return say(f"{phrase} for {pretty} initiated.")
 
         # ----- StandupIntent / SitDownIntent -----
         if name in ("StandupIntent", "SitDownIntent"):
@@ -490,10 +561,10 @@ class HubServer:
                     return say(f"{pname} isn't playing at the table.")
                 pretty = pname
             elif ok_seat:
-                result = await self._wait_for_seat_name(seat, timeout_ms=1200)
-                if result == "":
+                result_name, _ = await self._wait_for_seat_name(seat, timeout_ms=1200)
+                if result_name == "":
                     return say(f"No one is seated at seat {seat}.")
-                pretty = result or f"seat {seat}"
+                pretty = result_name or f"seat {seat}"
             else:
                 pretty = "player"
 
@@ -534,13 +605,13 @@ class HubServer:
                     return say(f"{pname} isn't playing at the table.")
                 pretty = pname
             elif ok_seat:
-                result = await self._wait_for_seat_name(seat, timeout_ms=1200)
+                result_name, _ = await self._wait_for_seat_name(seat, timeout_ms=1200)
                 if self._wire:
-                    state = "timeout(None)" if result is None else ("blank('')" if result == "" else f"name({result!r})")
+                    state = "timeout(None)" if result_name is None else ("blank('')" if result_name == "" else f"name({result_name!r})")
                     log.info("ALEXA seat_name result for seat %d (final_chips): %s", seat, state)
-                if result == "":
+                if result_name == "":
                     return say(f"No one is seated at seat {seat}.")
-                pretty = result or f"seat {seat}"
+                pretty = result_name or f"seat {seat}"
             else:
                 pretty = "player"
 
@@ -578,10 +649,10 @@ class HubServer:
                     return say(f"{pname} isn't playing at the table.")
                 pretty = pname
             elif ok_seat:
-                result = await self._wait_for_seat_name(seat, timeout_ms=1200)
-                if result == "":
+                result_name, _ = await self._wait_for_seat_name(seat, timeout_ms=1200)
+                if result_name == "":
                     return say(f"No one is seated at seat {seat}.")
-                pretty = result or f"seat {seat}"
+                pretty = result_name or f"seat {seat}"
             else:
                 pretty = "player"
 
@@ -654,10 +725,17 @@ class HubServer:
                         seat = j.get("seat")
                         pname_raw = j.get("name")
                         pname = "" if pname_raw is None else str(pname_raw).strip()
+                        matched_name_raw = j.get("matched_name")  # The name Alexa sent (for waiter matching)
+                        matched_name = "" if matched_name_raw is None else str(matched_name_raw).strip()
+                        total_rebuys = j.get("total_rebuys")  # Extract total_rebuys if present
                         if isinstance(seat, int):
                             if self._wire:
-                                log.info("TAB→HUB seat_name seat=%s name=%r", seat, pname)
-                            await self._fulfill_seat_name_waiters(seat, pname)
+                                log.info("TAB→HUB seat_name seat=%s name=%r matched_name=%r total_rebuys=%r", seat, pname, matched_name, total_rebuys)
+                            # Use matched_name for waiter fulfillment if available, otherwise use display name
+                            waiter_name = matched_name if matched_name else pname
+                            log.info("Fulfilling seat_name waiters: seat=%d, name=%r, waiter_name=%r, total_rebuys=%r, active_name_waiters=%s", 
+                                    seat, pname, waiter_name, total_rebuys, list(self._seat_name_by_name_waiters.keys()))
+                            await self._fulfill_seat_name_waiters(seat, pname, total_rebuys, waiter_name)
                         continue
                     
                     if cmd == "player_not_found":
