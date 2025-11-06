@@ -18,6 +18,18 @@ def _rank_roi_rect(h, w):
     y1, x1 = y0 + box, x0 + int(0.75 * box)
     return (y0, y1, x0, x1)
 
+# --- suit-center ROI for distinguishing hearts vs diamonds ---
+def _suit_center_roi_rect(h, w):
+    # ROI in the center of the card where suit symbols are prominent
+    m = min(h, w)
+    center_y, center_x = h // 2, w // 2
+    roi_size = int(0.25 * m)  # 25% of the short side
+    y0 = max(0, center_y - roi_size // 2)
+    y1 = min(h, center_y + roi_size // 2)
+    x0 = max(0, center_x - roi_size // 2)
+    x1 = min(w, center_x + roi_size // 2)
+    return (y0, y1, x0, x1)
+
 def _roi(img, rect):
     y0, y1, x0, x1 = rect
     return img[y0:y1, x0:x1]
@@ -103,25 +115,62 @@ def _best_match(gwarp):
     if len(top2) == 1:
         return top2[0][1], float(top2[0][0])
 
-    # 2) tie-break only for 2/3/4 and when scores are close
+    # 2) tie-break for close matches, especially when distinguishing similar cards
     (s1, c1, t1, g1), (s2, c2, t2, g2) = top2
     R1, S1 = c1[:-1], c1[-1]
     R2, S2 = c2[:-1], c2[-1]
 
     close = (s1 - s2) <= 0.02             # margin you can tune
-    small_ranks = {R1, R2}.issubset({"2","3","4"})
+    same_rank = (R1 == R2)
+    different_suit = (S1 != S2)
     same_suit = (S1 == S2)
+    small_ranks = {R1, R2}.issubset({"2","3","4","5"})  # Include rank 5
+    medium_ranks = {R1, R2}.issubset({"4","5","6","7"})  # Ranks that can be confused
+    red_suit_confusion = {S1, S2} == {"H", "D"}  # Hearts vs Diamonds confusion
 
-    if close and small_ranks and same_suit:
+    # Case 1: Same rank, different suit (especially H vs D) - use suit center ROI
+    if close and same_rank and different_suit and red_suit_confusion:
+        suit_rect = _suit_center_roi_rect(H, W)
+        gs1 = _roi(g1, suit_rect); ts1 = _roi(t1, suit_rect)
+        gs2 = _roi(g2, suit_rect); ts2 = _roi(t2, suit_rect)
+        s1s = cv2.matchTemplate(gs1, ts1, cv2.TM_CCOEFF_NORMED)[0][0]
+        s2s = cv2.matchTemplate(gs2, ts2, cv2.TM_CCOEFF_NORMED)[0][0]
+        if s2s > s1s + 1e-4:  # tiny epsilon
+            return c2, float(s2)
+        # else fall through to c1
+    
+    # Case 2: Same rank, different suit (general case) - use suit center ROI
+    elif close and same_rank and different_suit:
+        suit_rect = _suit_center_roi_rect(H, W)
+        gs1 = _roi(g1, suit_rect); ts1 = _roi(t1, suit_rect)
+        gs2 = _roi(g2, suit_rect); ts2 = _roi(t2, suit_rect)
+        s1s = cv2.matchTemplate(gs1, ts1, cv2.TM_CCOEFF_NORMED)[0][0]
+        s2s = cv2.matchTemplate(gs2, ts2, cv2.TM_CCOEFF_NORMED)[0][0]
+        if s2s > s1s + 1e-4:
+            return c2, float(s2)
+    
+    # Case 3: Same suit, different rank (e.g., 5H vs 6H) - use rank corner ROI
+    elif close and same_suit and not same_rank and medium_ranks:
         # rank-only correlation in the corner ROI (higher resolution, more discriminative)
         gr1 = _roi(g1, rank_rect); tr1 = _roi(t1, rank_rect)
         gr2 = _roi(g2, rank_rect); tr2 = _roi(t2, rank_rect)
-        # If the ROI is tiny, INTER_LINEAR can blur; INTER_AREA is fine here.
         s1r = cv2.matchTemplate(gr1, tr1, cv2.TM_CCOEFF_NORMED)[0][0]
         s2r = cv2.matchTemplate(gr2, tr2, cv2.TM_CCOEFF_NORMED)[0][0]
         if s2r > s1r + 1e-4:  # tiny epsilon
             return c2, float(s2)
         # else fall through to c1
+    
+    # Case 4: Original logic - same suit, small ranks - use rank corner ROI
+    elif close and same_suit and small_ranks:
+        # rank-only correlation in the corner ROI (higher resolution, more discriminative)
+        gr1 = _roi(g1, rank_rect); tr1 = _roi(t1, rank_rect)
+        gr2 = _roi(g2, rank_rect); tr2 = _roi(t2, rank_rect)
+        s1r = cv2.matchTemplate(gr1, tr1, cv2.TM_CCOEFF_NORMED)[0][0]
+        s2r = cv2.matchTemplate(gr2, tr2, cv2.TM_CCOEFF_NORMED)[0][0]
+        if s2r > s1r + 1e-4:  # tiny epsilon
+            return c2, float(s2)
+        # else fall through to c1
+    
     return c1, float(s1)
 
 
