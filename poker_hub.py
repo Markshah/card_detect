@@ -658,6 +658,32 @@ class HubServer:
 
             return say(f"{pretty} recorded as the change round winner.")
 
+        # ----- PauseTimerIntent -----
+        if name == "PauseTimerIntent":
+            now = int(time.time() * 1000)
+            payload = {"command": "pause_timer",
+                       "source": "alexaCustomSkill", "ts": now}
+            
+            if self._wire:
+                log.info("ALEXA→TAB sending pause_timer payload: %s",
+                         trunc(json.dumps(payload, separators=(',', ':'))))
+            await self._forward_to_tablets(payload)
+            
+            return say("Dealer timer paused.")
+
+        # ----- ResumeTimerIntent -----
+        if name == "ResumeTimerIntent":
+            now = int(time.time() * 1000)
+            payload = {"command": "resume_timer",
+                       "source": "alexaCustomSkill", "ts": now}
+            
+            if self._wire:
+                log.info("ALEXA→TAB sending resume_timer payload: %s",
+                         trunc(json.dumps(payload, separators=(',', ':'))))
+            await self._forward_to_tablets(payload)
+            
+            return say("Dealer timer resumed.")
+
         # Fallback
         return say("I didn't get that.")
 
