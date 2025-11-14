@@ -125,7 +125,7 @@ def log_event(s: str):
     ts = time.strftime("%H:%M:%S"); events.appendleft(f"{ts}  {s}")
 
 # ---------------- WebSocket: single connection to the Hub ----------------
-from ws_mgr import WSManager
+from poker_hub_client import WSManager
 HUB_WS_URL = os.getenv("HUB_WS_URL", "ws://192.168.1.54:8888").strip()
 
 ws_hub = WSManager(url=HUB_WS_URL, on_event=log_event, name="Hub")

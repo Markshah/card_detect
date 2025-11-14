@@ -1,4 +1,4 @@
-# ws_mgr.py
+# poker_hub_client.py
 import json, os, time, threading, logging
 from websocket import WebSocketApp
 
