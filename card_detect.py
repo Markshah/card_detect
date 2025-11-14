@@ -488,7 +488,12 @@ class ClassifyWorkers:
                 if len(out) == 3: code, score, _rot = out
                 else:             code, score = out
                 self.results.put((epoch, slot_idx, (code, float(score or 0.0))))
-            except Exception:
+            except Exception as e:
+                # Log errors in background worker
+                import traceback
+                print(f"[BG Worker ERROR] slot {slot_idx}: {e}")
+                if "QUIET" not in str(os.getenv("QUIET_LOGS", "")):
+                    traceback.print_exc()
                 self.results.put((epoch, slot_idx, (None, 0.0)))
             finally:
                 with self._lock: self.inflight.discard((epoch, slot_idx))
@@ -588,7 +593,19 @@ class SlotTracker:
         s = self.slots[slot_idx]
         if s is None: return False
         prev = s["code"]
-        if (prev == "UNK" and code) or (score is not None and score > (s["score"] or 0.0)):
+        prev_score = s.get("score", 0.0) or 0.0
+        
+        # Only update if:
+        # 1. Previous was UNK and we have a code, OR
+        # 2. New score is better - use smaller margin for low-confidence matches
+        if prev == "UNK":
+            score_margin = 0.0  # Always accept first match
+        elif prev_score < 0.60:
+            score_margin = 0.05  # Low confidence - allow small improvements
+        else:
+            score_margin = 0.15  # High confidence - require big improvement
+        
+        if (prev == "UNK" and code) or (score is not None and score > prev_score + score_margin):
             s["code"] = code
             s["score"] = float(score or 0.0)
             return True
@@ -630,7 +647,7 @@ class FrameSource:
             except Exception: pass
 
 # -------------- main --------------
-CLASSIFY_THRESH = 0.55
+CLASSIFY_THRESH = float(os.getenv("CLASSIFY_THRESH", os.getenv("FULLCARD_MIN_SCORE", "0.55")))
 DASH_EVERY_N = max(1, int(os.getenv("DASH_EVERY_N", "5")))
 
 zero_up_start_ts = None
@@ -803,25 +820,52 @@ def main():
         # ---- background classification for UNKNOWN slots ----
         improved = False
         if face_up_now >= ARM_FACEUP_MIN:
+            unk_count = sum(1 for s in slots.slots if s and s.get("code") == "UNK")
             for i, s in enumerate(slots.slots):
-                if s is None or s["code"] != "UNK": continue
+                if s is None: continue
+                # Classify UNK slots, or re-classify low-confidence matches (might be wrong)
+                current_score = s.get("score", 0.0) or 0.0
+                if s["code"] != "UNK" and current_score >= 0.65:
+                    continue  # Skip high-confidence matches (don't waste time re-classifying)
                 warp = s.get("warp")
                 if warp is None: continue
                 if BG_CLASSIFY and workers:
                     workers.submit(slots.epoch, i, warp)
                 else:
-                    out = _classify_card(warp)
-                    if len(out) == 3: code, score, _rot = out
-                    else:             code, score = out
-                    if code and score >= CLASSIFY_THRESH:
-                        if slots.improve_code(i, code.upper(), score):
-                            improved = True
+                    try:
+                        out = _classify_card(warp)
+                        if len(out) == 3: code, score, _rot = out
+                        else:             code, score = out
+                        # Log classification results (throttled to avoid spam)
+                        if code and score >= CLASSIFY_THRESH:
+                            log_event(f"✓ Classified slot {i}: {code} (score={score:.3f})")
+                        elif frame_idx % 30 == 0:  # Log failures less frequently
+                            log_event(f"✗ Slot {i}: {code or 'None'} (score={score:.3f}, need {CLASSIFY_THRESH})")
+                        if code and score >= CLASSIFY_THRESH:
+                            if slots.improve_code(i, code.upper(), score):
+                                improved = True
+                    except Exception as e:
+                        log_event(f"Classification error slot {i}: {e}")
+                        if not QUIET_LOGS:
+                            import traceback
+                            traceback.print_exc()
+                        continue
             if BG_CLASSIFY and workers:
-                for (epoch, idx, (code, score)) in workers.fetch_all():
-                    if epoch != slots.epoch: continue
+                all_results = workers.fetch_all()
+                if all_results and frame_idx % 20 == 0:
+                    log_event(f"BG workers returned {len(all_results)} results")
+                for (epoch, idx, (code, score)) in all_results:
+                    if epoch != slots.epoch:
+                        if frame_idx % 30 == 0:
+                            log_event(f"BG result epoch mismatch: {epoch} vs {slots.epoch} for slot {idx}")
+                        continue
+                    # Log classification results from background workers
                     if code and score >= CLASSIFY_THRESH:
+                        log_event(f"✓ Classified slot {idx}: {code} (score={score:.3f}) [BG]")
                         if slots.improve_code(idx, code.upper(), score):
                             improved = True
+                    elif frame_idx % 20 == 0:  # Log failures more frequently
+                        log_event(f"✗ Slot {idx}: {code or 'None'} (score={score:.3f}, need {CLASSIFY_THRESH}) [BG]")
 
         det_codes = slots.codes_list()
         if improved and (armed or face_up_now >= ARM_FACEUP_MIN) and face_up_now > 0:
