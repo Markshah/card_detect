@@ -30,3 +30,4 @@ oldStuff/bwLastWorking/env
 *.pem
 *.crt
 *.p12
+templates_temp/
