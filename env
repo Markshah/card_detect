@@ -16,6 +16,7 @@ RESET_DEBOUNCE_SEC=5.0
 
 
 # --- Saving / Debug ---
+DASH_ROWS=70               # number of recent events
 SAVE_IMAGES=0
 SAVE_WARPS=0
 SAVE_GRAYSCALE=0          # save gray with detection overlays
@@ -26,7 +27,6 @@ DEBUG_EDGE_HIGH=90
 SAVE_RING_DEBUG=0         # force saving ring panels for each detected card
 LOG_REJECTIONS=0          # print reject reasons (area/aspect/px/etc.)
 DRAW_LABEL_STATS=1
-DASH_ROWS=20               # number of recent events
 QUIET_LOGS=1
 DASH_BIGTEXT=0          # (new) skip heavy Figlet banners
 DRAW_OVERLAYS=0         # (new) don't draw boxes/labels on the frame
