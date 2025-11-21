@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Kill poker_hub, card_detect, and cloudflared processes,
+# Kill poker_hub and card_detect processes,
 # then close ALL Terminal windows running these processes.
 # Works on macOS default Bash 3.2 (no mapfile).
 
-echo "🛑 Stopping Poker Hub, Card Detector, and Cloudflare Tunnel..."
+echo "🛑 Stopping Poker Hub and Card Detector..."
 
 # ---- graceful kill helper ----
 kill_grace() {
@@ -27,20 +27,18 @@ collect_pids() {
 # 1) Kill python scripts
 hub_pids="$(collect_pids 'poker_hub\.py')"
 det_pids="$(collect_pids 'card_detect\.py')"
-tunnel_pids="$(collect_pids 'cloudflared.*tunnel.*pokerhub')"
-[ -z "$tunnel_pids" ] && tunnel_pids="$(collect_pids 'cloudflared')"  # fallback
 
-# Kill all three kinds
-kill_grace $hub_pids $det_pids $tunnel_pids
+# Kill both kinds
+kill_grace $hub_pids $det_pids
 
-# 2) Close ALL windows for hub, detector, and tunnel
+# 2) Close ALL windows for hub and detector
 #    We match by:
-#      - tab contents containing "poker_hub.py", "card_detect.py", or "cloudflared"
-#      - OR the window/tab name containing "PokerHub", "CardDetector", or "CloudflareTunnel" (from startup titles)
-#      - OR the contents containing our header lines "=== POKER HUB ===", "=== CARD DETECTOR ===", or "=== CLOUDFLARE TUNNEL ==="
+#      - tab contents containing "poker_hub.py" or "card_detect.py"
+#      - OR the window/tab name containing "PokerHub" or "CardDetector" (from startup titles)
+#      - OR the contents containing our header lines "=== POKER HUB ===" or "=== CARD DETECTOR ==="
 osascript <<'APPLESCRIPT'
 tell application "Terminal"
-  set targets to {"poker_hub.py", "card_detect.py", "cloudflared", "=== POKER HUB ===", "=== CARD DETECTOR ===", "=== CLOUDFLARE TUNNEL ===", "PokerHub", "CardDetector", "CloudflareTunnel"}
+  set targets to {"poker_hub.py", "card_detect.py", "=== POKER HUB ===", "=== CARD DETECTOR ===", "PokerHub", "CardDetector"}
   set windowsToClose to {}
 
   repeat with w in windows
@@ -59,27 +57,32 @@ tell application "Terminal"
 
     if not shouldClose then
       -- Check each tab: name AND contents
-      repeat with t in tabs of w
-        try
-          set tname to (name of t) as text
-        on error
-          set tname to ""
-        end try
-        set tcontents to ""
-        try
-          set tcontents to (contents of t)
-        end try
+      try
+        set tabList to tabs of w
+        repeat with t in tabList
+          try
+            set tname to (name of t) as text
+          on error
+            set tname to ""
+          end try
+          set tcontents to ""
+          try
+            set tcontents to (contents of t)
+          end try
 
-        repeat with key in targets
-          set needle to (key as text)
-          if (tname contains needle) or (tcontents contains needle) then
-            set shouldClose to true
-            exit repeat
-          end if
+          repeat with key in targets
+            set needle to (key as text)
+            if (tname contains needle) or (tcontents contains needle) then
+              set shouldClose to true
+              exit repeat
+            end if
+          end repeat
+
+          if shouldClose then exit repeat
         end repeat
-
-        if shouldClose then exit repeat
-      end repeat
+      on error
+        -- If we can't access tabs, skip tab checking
+      end try
     end if
 
     if shouldClose then
@@ -96,6 +99,6 @@ tell application "Terminal"
 end tell
 APPLESCRIPT
 
-echo "✅ Killed poker_hub.py, card_detect.py, cloudflared."
+echo "✅ Killed poker_hub.py and card_detect.py."
 echo "✅ Closed all Terminal windows running these processes."
 
