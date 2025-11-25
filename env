@@ -5,8 +5,8 @@ ROI="0,0,0,0"
 
 # --- Arming / Reset Logic ---
 ARM_FACEUP_MIN=3
-ARM_SEC_N=1.0
-ZERO_UP_SEC=1.0
+ARM_SEC_N=2.0
+ZERO_UP_SEC=2.0
 
 # Optional burst/retry knobs for Arduino reset
 WS_SEND_RETRIES=40
