@@ -238,7 +238,7 @@ def run_simulator():
         log_event(f"[SIM] cards_detected -> {val}")
         render_dashboard(face_up_now=val, cards_now=val, armed=False,
                          arm_elapsed_sec=0.0, zero_elapsed_sec=0.0,
-                         peak_up=peak_up, cur_codes=[])
+                         peak_up=val, cur_codes=[])
         time.sleep(SIM_INTERVAL_SEC); idx+=1
 
 # -------------- vision helpers --------------
@@ -681,18 +681,6 @@ def main():
     except Exception as e:
         print(str(e)); return
 
-    # seconds-based thresholds
-    ARM_SEC     = float(os.getenv("ARM_SEC", "1.5"))
-    ZERO_UP_SEC = float(os.getenv("ZERO_UP_SEC", "2.0"))
-
-    armed = False
-    arm_start_ts = None
-    arm_elapsed = 0.0
-
-    zero_up_start_ts = None
-    zero_elapsed = 0.0
-
-    peak_up = 0
     init_card_detect_sent = False
 
     global _last_obs, _same_streak
@@ -714,7 +702,7 @@ def main():
         if not ok:
             time.sleep(SLEEP_SEC)
             if frame_idx % DASH_EVERY_N == 0:
-                render_dashboard(0, 0, armed, arm_elapsed, zero_elapsed, peak_up, cur_codes=[])
+                render_dashboard(0, 0, False, 0.0, 0.0, 0, cur_codes=[])
             frame_idx += 1
             continue
 
@@ -765,57 +753,11 @@ def main():
         peak_up     = max(peak_up, face_up_now)
         det_codes   = slots.codes_list()
 
-        def _codes_for_tablet(armed_flag: bool, fu_now: int, codes_now):
-            if fu_now == 0:
-                return []  # explicit zero
-            if armed_flag:
-                return list(codes_now)
-            return list(codes_now) if fu_now >= ARM_FACEUP_MIN else None
-
-        # EARLY NOTIFY on any count change
-        if (armed and face_up_now != prev_count) or (not armed and face_up_now >= ARM_FACEUP_MIN and face_up_now != prev_count):
-            send_cards_change_or_every(face_up_now, codes=_codes_for_tablet(armed, face_up_now, det_codes))
-
-        # ---- seconds-based arming & reset ----
-        if not armed:
-            if face_up_now >= ARM_FACEUP_MIN:
-                if arm_start_ts is None:
-                    arm_start_ts = now
-                arm_elapsed = now - arm_start_ts
-                if arm_elapsed >= ARM_SEC:
-                    armed = True
-                    send_cards_change_or_every(face_up_now, codes=_codes_for_tablet(True, face_up_now, det_codes))
-                    zero_up_start_ts = None
-                    zero_elapsed = 0.0
-                    peak_up = face_up_now
-                    log_event(f"STATE -> ARMED ({ARM_FACEUP_MIN}+ for {ARM_SEC:.1f}s)")
-            else:
-                arm_start_ts = None
-                arm_elapsed = 0.0
-        else:
-            if face_up_now == 0:
-                if zero_up_start_ts is None:
-                    zero_up_start_ts = now
-                zero_elapsed = now - zero_up_start_ts
-            else:
-                zero_up_start_ts = None
-                zero_elapsed = 0.0
-
-            if ZERO_UP_SEC > 0 and zero_elapsed >= ZERO_UP_SEC:
-                log_event(f"STATE -> RESET (zero-up for {ZERO_UP_SEC:.1f}s, peak={peak_up})")
-                send_cards_change_or_every(0, codes=[])  # explicit zero
-                # NEW: notify tablet that the hand/deal is complete
-                send_deal_completed_reliably()
-                armed = False
-                arm_start_ts = None
-                arm_elapsed = 0.0
-                zero_up_start_ts = None
-                zero_elapsed = 0.0
-                peak_up = 0
-                det_codes = []
-                slots.clear()
-            else:
-                send_cards_change_or_every(face_up_now, codes=_codes_for_tablet(armed, face_up_now, det_codes))
+        # Send card updates whenever count changes
+        # DashboardActivity will handle the business logic (tracking 3+ cards, auto-advancing after 3s of zero)
+        if face_up_now != prev_count:
+            codes_to_send = list(det_codes) if face_up_now > 0 else []
+            send_cards_change_or_every(face_up_now, codes=codes_to_send)
 
         # ---- background classification for UNKNOWN slots ----
         improved = False
@@ -868,13 +810,13 @@ def main():
                         log_event(f"✗ Slot {idx}: {code or 'None'} (score={score:.3f}, need {CLASSIFY_THRESH}) [BG]")
 
         det_codes = slots.codes_list()
-        if improved and (armed or face_up_now >= ARM_FACEUP_MIN) and face_up_now > 0:
+        if improved and face_up_now > 0:
             _send_cards_to_hub(face_up_now, codes=list(det_codes))
             log_event(f"codes_update -> {face_up_now}")
             _last_obs = face_up_now; _same_streak = 0
 
         if frame_idx % DASH_EVERY_N == 0:
-            render_dashboard(face_up_now, cards_now, armed, arm_elapsed, zero_elapsed, peak_up, cur_codes=det_codes)
+            render_dashboard(face_up_now, cards_now, False, 0.0, 0.0, face_up_now, cur_codes=det_codes)
 
         if SHOW_PREVIEW:
             cv2.imshow("Card Detector", frame)
