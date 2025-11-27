@@ -93,9 +93,6 @@ class WSManager:
             logging.exception("send_cards_detected failed")
             return False
 
-    def send_move_dealer_forward(self) -> bool:
-        return self.send_json({"command": "move_dealer_forward"})
-
     def send_ping(self) -> bool:
         return self.send_json({"command": "ping", "ts": time.time()})
 

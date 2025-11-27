@@ -4,15 +4,11 @@ SLEEP_SEC=0.1
 ROI="0,0,0,0"
 
 # --- Arming / Reset Logic ---
-ARM_FACEUP_MIN=3
-ARM_SEC_N=2.0
-ZERO_UP_SEC=2.0
-
-# Optional burst/retry knobs for Arduino reset
-WS_SEND_RETRIES=40
-WS_RETRY_DELAY_MS=500
-WS_AWAIT_CONNECT_SEC=2.0
-RESET_DEBOUNCE_SEC=5.0
+# NOTE: Arming/reset logic moved to tablet. These variables are no longer used.
+# ARM_FACEUP_MIN=3
+# ARM_SEC=1.5
+# ZERO_UP_SEC=2.0
+# RESET_DEBOUNCE_SEC=1.2
 
 
 # --- Saving / Debug ---
@@ -70,9 +66,8 @@ WARP_H=700
 # Use L-only rim logic (robust under purple/ambient shifts)
 USE_GRAYSCALE_ONLY=1
 
-# --- WebSockets (dual destinations) ---
-TABLET_WS_URL=ws://192.168.1.246:8765
-ARDUINO_WS_URL=ws://192.168.1.54:8888
+# --- WebSocket (Hub connection) ---
+HUB_WS_URL=ws://192.168.1.54:8888
 
 # Resend policy
 RESEND_EVERY=5

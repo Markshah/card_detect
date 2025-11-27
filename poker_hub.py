@@ -2,13 +2,11 @@
 """
 Poker Table Hub (Mac mini)
 - WebSocket <-> USB Serial bridge with role-based routing
-- HTTP endpoint for a Custom Alexa Skill
 
 Routing rules:
 - DETECTOR  -> TABLET only
 - TABLET    -> ARDUINO (Serial) only   (except special "seat_name" messages handled internally)
 - ARDUINO   -> TABLET only
-- HTTP (/alexa, POST) -> TABLET broadcast (rebuy/stand/sit/final_chips/change_round_winner), then waits briefly for seat_name
 
 Run examples:
   python poker_hub.py --serial /dev/tty.usbmodem48CA435C84242 --wire
@@ -21,7 +19,6 @@ Env (optional):
   HTTP_BRIDGE_PORT=8787
   FIXED_REBUY_AMOUNT=20
   FIXED_HALF_REBUY_AMOUNT=10
-  ALEXA_SKILL_ID=amzn1.ask.skill.xxxxx...        # your exact Skill ID (recommended)
   SEAT_NAME_TIMEOUT_MS=2500                      # optional override (default 2500 ms)
 """
 
@@ -49,7 +46,6 @@ DEFAULT_BAUD    = int(os.getenv("BAUD", "115200"))
 DEFAULT_HTTP_PORT     = int(os.getenv("HTTP_BRIDGE_PORT", "8787"))
 FIXED_REBUY           = int(os.getenv("FIXED_REBUY_AMOUNT", "20"))
 FIXED_HALF_REBUY      = int(os.getenv("FIXED_HALF_REBUY_AMOUNT", "10"))
-ALEXA_SKILL_ID        = os.getenv("ALEXA_SKILL_ID", "").strip()
 SEAT_NAME_TIMEOUT_MS  = int(os.getenv("SEAT_NAME_TIMEOUT_MS", "2500"))
 
 SEAT_MAX = int(os.getenv("SEAT_MAX", "9"))  # valid seats are 0..SEAT_MAX (inclusive)
@@ -90,6 +86,7 @@ class SerialBridge:
         self._thr = None
         self._wire = wire
         self._warned_no_serial = False
+        self._device_not_configured_logged = False
 
     def open(self):
         if not self.port:
@@ -156,8 +153,17 @@ class SerialBridge:
                 else:
                     time.sleep(0.01)
             except Exception as e:
-                log.warning(f"{RED}Serial read error: {e!r}{RESET}")
-                time.sleep(0.2)
+                # Check if device is not configured - log once and stop trying
+                error_str = str(e)
+                if "Device not configured" in error_str or "[Errno 6]" in error_str:
+                    if not self._device_not_configured_logged:
+                        log.warning(f"{RED}Serial device not configured (Arduino may be off). Stopping serial reads.{RESET}")
+                        self._device_not_configured_logged = True
+                    # Break out of loop - stop trying to read
+                    break
+                else:
+                    log.warning(f"{RED}Serial read error: {e!r}{RESET}")
+                    time.sleep(0.2)
 
 # --------------------------
 # WebSocket server with roles
@@ -187,9 +193,6 @@ class HubServer:
         
         # Waiters for seat-name replies by player name (keyed by normalized name)
         self._seat_name_by_name_waiters: Dict[str, List[asyncio.Future]] = {}
-        
-        # Waiters for player_not_found responses (keyed by player name)
-        self._player_not_found_waiters: Dict[str, List[asyncio.Future]] = {}
 
         self._http_runner: web.AppRunner | None = None
 
@@ -219,8 +222,7 @@ class HubServer:
             return web.Response(text="ok")
 
         app.add_routes([
-            web.get("/alexa", _health),
-            web.post("/alexa", self._handle_alexa),
+            web.get("/health", _health),
             web.get("/healthz", _health),
         ])
 
@@ -308,33 +310,6 @@ class HubServer:
             except Exception:
                 pass
     
-    async def _wait_for_player_not_found(self, player_name: str, timeout_ms: int = 1000) -> bool:
-        """Wait for player_not_found response. Returns True if player not found, False if timeout."""
-        fut: asyncio.Future = self.loop.create_future()  # type: ignore
-        self._player_not_found_waiters.setdefault(player_name.lower(), []).append(fut)
-        try:
-            result = await asyncio.wait_for(fut, timeout=timeout_ms / 1000.0)
-            return result  # type: ignore
-        except asyncio.TimeoutError:
-            return False
-        finally:
-            try:
-                lst = self._player_not_found_waiters.get(player_name.lower(), [])
-                if fut in lst:
-                    lst.remove(fut)
-            except Exception:
-                pass
-    
-    async def _fulfill_player_not_found_waiters(self, player_name: str):
-        """Notify waiters that a player was not found."""
-        lst = self._player_not_found_waiters.get(player_name.lower())
-        if not lst:
-            return
-        while lst:
-            fut = lst.pop(0)
-            if not fut.done():
-                fut.set_result(True)
-
     # ---------- seat & chips helpers ----------
     def _parse_seat_from_slots(self, slots) -> tuple[bool, Optional[int], Optional[str]]:
         """Parse seat number from slots. Returns (ok, seat, error_message)."""
@@ -399,293 +374,7 @@ class HubServer:
             return False, None, "Chip amount must be zero or more."
         return True, chips, None
 
-    # ---------- Alexa handler ----------
-    async def _handle_alexa(self, request: web.Request) -> web.Response:
-        def say(text: str):
-            return web.json_response({
-                "version": "1.0",
-                "response": {
-                    "shouldEndSession": True,
-                    "outputSpeech": {"type": "PlainText", "text": text}
-                }
-            })
-
-        try:
-            body = await request.json()
-        except Exception:
-            return web.json_response({"error": "bad json"}, status=400)
-
-        # Verify Skill ID if provided
-        app_id = (
-            body.get("session", {}).get("application", {}).get("applicationId")
-            or body.get("context", {}).get("System", {}).get("application", {}).get("applicationId")
-        )
-        if ALEXA_SKILL_ID and app_id != ALEXA_SKILL_ID:
-            return web.json_response({"error": "forbidden"}, status=403)
-
-        req = body.get("request", {})
-        rtype = req.get("type")
-
-        if rtype == "LaunchRequest":
-            return say("Poker table ready.")
-        if rtype != "IntentRequest":
-            return say("OK.")
-
-        intent = req.get("intent", {})
-        name   = intent.get("name", "")
-        slots  = intent.get("slots", {})
-
-        intent = req.get("intent", {})
-        name   = intent.get("name", "")
-        slots  = intent.get("slots", {})
-
-        if self._wire:
-            log.info("ALEXA request → intent=%s  slots=%s", name, json.dumps(slots))
-
-        # ----- RebuyIntent / RebuyHalfIntent -----
-        if name in ("RebuyIntent", "RebuyHalfIntent"):
-            # Try player name first, then fall back to seat number
-            ok_name, pname, err_name = self._parse_player_name_from_slots(slots)
-            ok_seat, seat, err_seat = self._parse_seat_from_slots(slots)
-            
-            if not ok_name and not ok_seat:
-                # Neither provided - give helpful error
-                if err_seat:
-                    return say(err_seat)
-                return say("I need either a player name or seat number.")
-
-            now  = int(time.time() * 1000)
-            amount  = FIXED_HALF_REBUY if name == "RebuyHalfIntent" else FIXED_REBUY
-            command = "half_rebuy" if name == "RebuyHalfIntent" else "rebuy"
-
-            payload = {"command": command, "amount": amount,
-                       "source": "alexaCustomSkill", "ts": now}
-            
-            # Add either player name or seat to payload
-            if ok_name and pname:
-                payload["player_name"] = pname
-                # For dedupe, use name if we have it
-                dedupe_key = f"name:{pname.lower()}"
-            elif ok_seat:
-                payload["seat"] = seat
-                dedupe_key = f"seat:{seat}"
-                # Check dedupe window for seat-based requests
-                last = self._last_rebuy_ts_by_seat.get(seat, 0)
-                if now - last < self._dedupe_ms:
-                    result_name, _ = await self._wait_for_seat_name(seat, timeout_ms=800)
-                    if self._wire:
-                        log.info("ALEXA duplicate window: seat=%d name_result=%r", seat, result_name)
-                    if result_name == "":
-                        return say(f"No one is seated at seat {seat}.")
-                    pretty = result_name or f"seat {seat}"
-                    return say(f"{'Half rebuy' if name == 'RebuyHalfIntent' else 'Rebuy'} for {pretty} already processed.")
-                self._last_rebuy_ts_by_seat[seat] = now
-            else:
-                return say("I need either a player name or seat number.")
-
-            if self._wire:
-                log.info("ALEXA→TAB sending rebuy payload: %s", trunc(json.dumps(payload, separators=(',', ':'))))
-            
-            # For name-based requests, set up waiters BEFORE sending (so we don't miss fast responses)
-            total_rebuys = None
-            if ok_name and pname:
-                # Set up waiter for seat_name response (before sending command)
-                seat_name_task = asyncio.create_task(self._wait_for_seat_name_by_name(pname, timeout_ms=2000))
-                player_not_found_task = asyncio.create_task(self._wait_for_player_not_found(pname, timeout_ms=500))
-            
-            await self._forward_to_tablets(payload)
-
-            # For name-based requests, wait for seat_name or player_not_found response
-            if ok_name and pname:
-                # Wait for player_not_found first (shorter timeout)
-                not_found = await player_not_found_task
-                if not_found:
-                    seat_name_task.cancel()  # Cancel the other waiter
-                    return say(f"{pname} isn't playing at the table.")
-                # If found, wait for seat_name response to get total_rebuys
-                # The tablet will resolve the name to a seat and send seat_name back
-                result_name, result_total_rebuys = await seat_name_task
-                if self._wire:
-                    state = "timeout(None)" if result_name is None else ("blank('')" if result_name == "" else f"name({result_name!r})")
-                    log.info("ALEXA seat_name result for name '%s': %s total_rebuys=%r", pname, state, result_total_rebuys)
-                # Use the original name Alexa sent (pname), not the display name (result_name)
-                # This ensures Alexa says back the same name/nickname that was used in the request
-                pretty = pname
-                total_rebuys = result_total_rebuys
-            elif ok_seat:
-                result_name, result_total_rebuys = await self._wait_for_seat_name(seat)
-                if self._wire:
-                    state = "timeout(None)" if result_name is None else ("blank('')" if result_name == "" else f"name({result_name!r})")
-                    log.info("ALEXA seat_name result for seat %d: %s total_rebuys=%r", seat, state, result_total_rebuys)
-                if result_name == "":
-                    return say(f"No one is seated at seat {seat}.")
-                pretty = result_name or f"seat {seat}"
-                total_rebuys = result_total_rebuys
-            else:
-                pretty = "player"
-
-            phrase = "Half rebuy" if name == "RebuyHalfIntent" else "Rebuy"
-            if total_rebuys is not None:
-                return say(f"{phrase} for {pretty} initiated. {pretty} now owes {total_rebuys} dollars.")
-            else:
-                return say(f"{phrase} for {pretty} initiated.")
-
-        # ----- StandupIntent / SitDownIntent -----
-        if name in ("StandupIntent", "SitDownIntent"):
-            ok_name, pname, err_name = self._parse_player_name_from_slots(slots)
-            ok_seat, seat, err_seat = self._parse_seat_from_slots(slots)
-            
-            if not ok_name and not ok_seat:
-                if err_seat:
-                    return say(err_seat)
-                return say("I need either a player name or seat number.")
-
-            is_sitting = (name == "SitDownIntent")
-            payload = {"command": "set_sitting", "is_sitting": is_sitting,
-                       "source": "alexaCustomSkill", "ts": int(time.time() * 1000)}
-            
-            if ok_name and pname:
-                payload["player_name"] = pname
-            elif ok_seat:
-                payload["seat"] = seat
-            else:
-                return say("I need either a player name or seat number.")
-            
-            if self._wire:
-                log.info("ALEXA→TAB sending set_sitting payload: %s", trunc(json.dumps(payload, separators=(',', ':'))))
-            await self._forward_to_tablets(payload)
-
-            if ok_name and pname:
-                not_found = await self._wait_for_player_not_found(pname, timeout_ms=500)
-                if not_found:
-                    return say(f"{pname} isn't playing at the table.")
-                pretty = pname
-            elif ok_seat:
-                result_name, _ = await self._wait_for_seat_name(seat, timeout_ms=1200)
-                if result_name == "":
-                    return say(f"No one is seated at seat {seat}.")
-                pretty = result_name or f"seat {seat}"
-            else:
-                pretty = "player"
-
-            return say(f"{pretty} is now marked as {'playing' if is_sitting else 'not playing'}.")
-
-        # ----- FinalChipsIntent -----
-        if name == "FinalChipsIntent":
-            ok_name, pname, err_name = self._parse_player_name_from_slots(slots)
-            ok_seat, seat, err_seat = self._parse_seat_from_slots(slots)
-            
-            if not ok_name and not ok_seat:
-                if err_seat:
-                    return say(err_seat)
-                return say("I need either a player name or seat number.")
-            
-            ok_amt, chips, err_amt = self._parse_chips_from_slots(slots)
-            if not ok_amt:
-                return say(err_amt)
-
-            now = int(time.time() * 1000)
-            payload = {"command": "final_chips", "chips": chips,
-                       "source": "alexaCustomSkill", "ts": now}
-            
-            if ok_name and pname:
-                payload["player_name"] = pname
-            elif ok_seat:
-                payload["seat"] = seat
-            else:
-                return say("I need either a player name or seat number.")
-            
-            if self._wire:
-                log.info("ALEXA→TAB sending final_chips payload: %s", trunc(json.dumps(payload, separators=(',', ':'))))
-            await self._forward_to_tablets(payload)
-
-            if ok_name and pname:
-                not_found = await self._wait_for_player_not_found(pname, timeout_ms=500)
-                if not_found:
-                    return say(f"{pname} isn't playing at the table.")
-                pretty = pname
-            elif ok_seat:
-                result_name, _ = await self._wait_for_seat_name(seat, timeout_ms=1200)
-                if self._wire:
-                    state = "timeout(None)" if result_name is None else ("blank('')" if result_name == "" else f"name({result_name!r})")
-                    log.info("ALEXA seat_name result for seat %d (final_chips): %s", seat, state)
-                if result_name == "":
-                    return say(f"No one is seated at seat {seat}.")
-                pretty = result_name or f"seat {seat}"
-            else:
-                pretty = "player"
-
-            return say(f"Recorded final chips for {pretty}: {chips} dollars.")
-
-        # ----- ChangeRoundIntent -----
-        if name == "ChangeRoundIntent":
-            ok_name, pname, err_name = self._parse_player_name_from_slots(slots)
-            ok_seat, seat, err_seat = self._parse_seat_from_slots(slots)
-            
-            if not ok_name and not ok_seat:
-                if err_seat:
-                    return say(err_seat)
-                return say("I need either a player name or seat number.")
-
-            now = int(time.time() * 1000)
-            payload = {"command": "change_round_winner",
-                       "source": "alexaCustomSkill", "ts": now}
-            
-            if ok_name and pname:
-                payload["player_name"] = pname
-            elif ok_seat:
-                payload["seat"] = seat
-            else:
-                return say("I need either a player name or seat number.")
-            
-            if self._wire:
-                log.info("ALEXA→TAB sending change_round_winner payload: %s",
-                         trunc(json.dumps(payload, separators=(',', ':'))))
-            await self._forward_to_tablets(payload)
-
-            if ok_name and pname:
-                not_found = await self._wait_for_player_not_found(pname, timeout_ms=500)
-                if not_found:
-                    return say(f"{pname} isn't playing at the table.")
-                pretty = pname
-            elif ok_seat:
-                result_name, _ = await self._wait_for_seat_name(seat, timeout_ms=1200)
-                if result_name == "":
-                    return say(f"No one is seated at seat {seat}.")
-                pretty = result_name or f"seat {seat}"
-            else:
-                pretty = "player"
-
-            return say(f"{pretty} recorded as the change round winner.")
-
-        # ----- PauseTimerIntent -----
-        if name == "PauseTimerIntent":
-            now = int(time.time() * 1000)
-            payload = {"command": "pause_timer",
-                       "source": "alexaCustomSkill", "ts": now}
-            
-            if self._wire:
-                log.info("ALEXA→TAB sending pause_timer payload: %s",
-                         trunc(json.dumps(payload, separators=(',', ':'))))
-            await self._forward_to_tablets(payload)
-            
-            return say("Dealer timer paused.")
-
-        # ----- ResumeTimerIntent -----
-        if name == "ResumeTimerIntent":
-            now = int(time.time() * 1000)
-            payload = {"command": "resume_timer",
-                       "source": "alexaCustomSkill", "ts": now}
-            
-            if self._wire:
-                log.info("ALEXA→TAB sending resume_timer payload: %s",
-                         trunc(json.dumps(payload, separators=(',', ':'))))
-            await self._forward_to_tablets(payload)
-            
-            return say("Dealer timer resumed.")
-
-        # Fallback
-        return say("I didn't get that.")
+    # ---------- role helpers ----------
 
     # ---------- role helpers ----------
     async def _set_role(self, ws, role: str):
@@ -742,7 +431,9 @@ class HubServer:
                 cmd = j.get("command")
 
                 if role == ROLE_DETECTOR:
-                    if cmd in ("cards_detected", "deal_completed"):
+                    if cmd == "cards_detected":
+                        if self._wire:
+                            log.info("DET→HUB: forwarding cards_detected to tablets")
                         await self._forward_to_tablets(j)
                     continue
 
@@ -764,12 +455,6 @@ class HubServer:
                             await self._fulfill_seat_name_waiters(seat, pname, total_rebuys, waiter_name)
                         continue
                     
-                    if cmd == "player_not_found":
-                        player_name = j.get("player_name", "")
-                        if player_name:
-                            if self._wire:
-                                log.info("TAB→HUB player_not_found player_name=%r", player_name)
-                            await self._fulfill_player_not_found_waiters(player_name)
                         continue
 
                     # TABLET -> ARDUINO (Serial) only
@@ -788,7 +473,7 @@ class HubServer:
             log.info(f"Client disconnected: {peer}")
 
     def _infer_role_from_message(self, j: dict) -> str:
-        if j.get("command") in ("cards_detected", "deal_completed"):
+        if j.get("command") == "cards_detected":
             return ROLE_DETECTOR
         return ROLE_TABLET
 
@@ -796,19 +481,24 @@ class HubServer:
     async def _forward_to_tablets(self, payload: dict):
         line = json.dumps(payload, separators=(",", ":"))
         tablets = await self._clients_with_role(ROLE_TABLET)
-        if self._wire and tablets:
-            log.info("HUB→TAB x%d %s", len(tablets), trunc(line))
-        dead = []
-        for ws in tablets:
-            try:
-                await ws.send(line)
-            except Exception:
-                dead.append(ws)
-        if dead:
-            async with self.clients_lock:
-                for ws in dead:
-                    self.clients_all.discard(ws)
-                    self.role_by_client.pop(ws, None)
+        if tablets:
+            if self._wire:
+                log.info("HUB→TAB x%d %s", len(tablets), trunc(line))
+            dead = []
+            for ws in tablets:
+                try:
+                    await ws.send(line)
+                except Exception as e:
+                    log.warning("Failed to send to tablet: %s", e)
+                    dead.append(ws)
+            if dead:
+                async with self.clients_lock:
+                    for ws in dead:
+                        self.clients_all.discard(ws)
+                        self.role_by_client.pop(ws, None)
+        else:
+            if self._wire:
+                log.warning("HUB→TAB: No tablets connected, dropping %s", trunc(line))
 
     async def _broadcast_serial_lines_to_tablets(self):
         """Serial → TABLET only."""
@@ -842,7 +532,7 @@ class HubServer:
 # Entrypoint
 # --------------------------
 def parse_args():
-    p = argparse.ArgumentParser(description="Poker Table Hub (WS <-> Serial) + Alexa HTTP endpoint")
+    p = argparse.ArgumentParser(description="Poker Table Hub (WS <-> Serial)")
     p.add_argument("--serial", help="Serial device (e.g., /dev/tty.usbmodem48CA435C84242)")
     p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
     p.add_argument("--ws-host", default=DEFAULT_WS_HOST)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Wednesday Night Poker — Card Detector
 # v2025.10.24 — single-WS (Hub) refactor + clear logging
-# Change: send `deal_completed` to tablet (via Hub) instead of `move_dealer_forward` to Arduino
+# Simplified: card_detect only sends detected cards; dealer advancement logic moved to tablet
 
 import os, sys, cv2, time, atexit, numpy as np, logging, hashlib, threading, queue
 from collections import deque
@@ -107,11 +107,6 @@ _ADAPT_LONG  = deque(maxlen=40)
 ADAPT_SLOP_S = 60
 ADAPT_SLOP_L = 90
 
-# ---- arming / reset policy ----
-ARM_FACEUP_MIN     = int(os.getenv("ARM_FACEUP_MIN", "2"))
-ZERO_UP_SEC        = float(os.getenv("ZERO_UP_SEC", "2.0"))
-ARM_SEC            = float(os.getenv("ARM_SEC", "1.5"))
-
 # ---- slot forget/TTL ----
 SLOT_FORGET_FRAMES = int(os.getenv("SLOT_FORGET_FRAMES", "8"))
 
@@ -150,11 +145,6 @@ _attach_hub_send_logger()
 ws_hub.start()
 atexit.register(ws_hub.stop)
 
-WS_SEND_RETRIES     = int(os.getenv("WS_SEND_RETRIES", "4"))
-WS_RETRY_DELAY_MS   = int(os.getenv("WS_RETRY_DELAY_MS", "150"))
-WS_AWAIT_CONNECT_S  = float(os.getenv("WS_AWAIT_CONNECT_SEC", "1.5"))
-RESET_DEBOUNCE_SEC  = float(os.getenv("RESET_DEBOUNCE_SEC", "1.2"))
-
 RESET  = "\033[0m"; BOLD="\033[1m"; GREEN="\033[1;32m"; RED="\033[1;31m"; YELLOW="\033[1;33m"; CYAN="\033[36m"; GRAY="\033[90m"; BLUE="\033[34m"
 
 # ---- logging quiet mode ----
@@ -163,14 +153,12 @@ if QUIET_LOGS:
     logging.getLogger("websocket").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
-def render_dashboard(face_up_now, cards_now, armed, arm_elapsed_sec, zero_elapsed_sec, peak_up, cur_codes):
+def render_dashboard(face_up_now, cards_now, cur_codes):
     import sys
     sys.stdout.write("\033[2J\033[H")
 
     DASH_BIGTEXT = int(os.getenv("DASH_BIGTEXT","0"))
     dash_rows    = int(os.getenv("DASH_ROWS","5"))
-    arm_target   = float(os.getenv("ARM_SEC", "1.5"))
-    zero_target  = float(os.getenv("ZERO_UP_SEC", "2.0"))
 
     print(f"{BOLD}\033[34m=== WED NIGHT POKER — CARD DETECTOR (via HUB) ==={RESET}")
 
@@ -192,21 +180,14 @@ def render_dashboard(face_up_now, cards_now, armed, arm_elapsed_sec, zero_elapse
     print(f"{BOLD}{YELLOW}UP{RESET}:{GREEN}{face_up_now}{RESET}  "
           f"{YELLOW}DOWN{RESET}:{RED}{down_now}{RESET}\n")
 
-    if armed:
-        nearing = (zero_target > 0 and zero_elapsed_sec >= zero_target)
-        state_txt = f"{YELLOW}RESET{RESET}" if nearing else f"{GREEN}ARMED{RESET}"
-    else:
-        state_txt = f"{YELLOW}ARMING{RESET}" if arm_elapsed_sec > 0 else f"{YELLOW}IDLE{RESET}"
-
     print(f"{BOLD}[LIVE]{RESET} Cards={YELLOW}{cards_now}{RESET}  "
-          f"State={state_txt}  Arm={arm_elapsed_sec:.1f}/{arm_target:.1f}s  "
-          f"Zero={zero_elapsed_sec:.1f}/{zero_target:.1f}s  Peak={peak_up}")
+          f"Face Up={GREEN}{face_up_now}{RESET}")
 
     if dash_rows > 0 and events:
         print(f"{GRAY}" + "-" * 72 + f"{RESET}")
         print("Recent events:")
         for line in list(events)[:dash_rows]:
-            color = GREEN if "ARMED" in line else (YELLOW if "RESET" in line else (RED if "fail" in line.lower() else GRAY))
+            color = GREEN if "detected" in line.lower() else (RED if "fail" in line.lower() else GRAY)
             print("  " + color + line + RESET)
     sys.stdout.flush()
 
@@ -233,12 +214,9 @@ def run_simulator():
     log_event(f"SIM MODE: sequence={seq} interval={SIM_INTERVAL_SEC:.1f}s  (to HUB)")
     while True:
         val = int(seq[idx % len(seq)])
-        peak_up = max(peak_up, val)
         _send_cards_to_hub(val)
         log_event(f"[SIM] cards_detected -> {val}")
-        render_dashboard(face_up_now=val, cards_now=val, armed=False,
-                         arm_elapsed_sec=0.0, zero_elapsed_sec=0.0,
-                         peak_up=peak_up, cur_codes=[])
+        render_dashboard(face_up_now=val, cards_now=val, cur_codes=[])
         time.sleep(SIM_INTERVAL_SEC); idx+=1
 
 # -------------- vision helpers --------------
@@ -420,7 +398,6 @@ def _card_candidates(mask, frame_w, frame_h):
 # -------------- WS helpers --------------
 _last_obs = None
 _same_streak = 0
-_last_deal_completed_ts = 0.0  # (was _last_reset_ts)
 
 def send_cards_change_or_every(count: int, codes=None):
     global _last_obs, _same_streak
@@ -434,33 +411,6 @@ def send_cards_change_or_every(count: int, codes=None):
         _same_streak = 0
         _send_cards_to_hub(count, codes=codes)
         return True
-    return False
-
-def send_deal_completed_reliably():
-    """
-    Notify the tablet (via Hub) that a deal/hand has completed.
-    Replaces the old Arduino 'move_dealer_forward' command.
-    """
-    global _last_deal_completed_ts
-    now = time.time()
-    if now - _last_deal_completed_ts < RESET_DEBOUNCE_SEC:
-        log_event(f"deal_completed skipped (debounce {now - _last_deal_completed_ts:.2f}s < {RESET_DEBOUNCE_SEC:.2f}s)")
-        return False
-
-    if not ws_hub.wait_connected(WS_AWAIT_CONNECT_S):
-        log_event("deal_completed not sent (Hub WS not connected)")
-        return False
-
-    for attempt in range(1, WS_SEND_RETRIES + 1):
-        log_event(f"[WS→HUB] deal_completed attempt {attempt}/{WS_SEND_RETRIES}")
-        ok = ws_hub.send_json({"command": "deal_completed"})
-        if ok:
-            _last_deal_completed_ts = time.time()
-            log_event(f"{CYAN}deal_completed sent via HUB (attempt {attempt}/{WS_SEND_RETRIES}){RESET}")
-            return True
-        time.sleep(WS_RETRY_DELAY_MS / 1000.0)
-
-    log_event(f"{RED}deal_completed FAILED after retries (to HUB){RESET}")
     return False
 
 # === Background classification ===
@@ -650,9 +600,6 @@ class FrameSource:
 CLASSIFY_THRESH = float(os.getenv("CLASSIFY_THRESH", os.getenv("FULLCARD_MIN_SCORE", "0.55")))
 DASH_EVERY_N = max(1, int(os.getenv("DASH_EVERY_N", "5")))
 
-zero_up_start_ts = None
-zero_elapsed = 0.0
-
 def _sha1_digest_of_warp(warp_bgr):
     g = cv2.cvtColor(warp_bgr, cv2.COLOR_BGR2GRAY)
     h = hashlib.sha1(g.tobytes()).hexdigest()
@@ -681,18 +628,6 @@ def main():
     except Exception as e:
         print(str(e)); return
 
-    # seconds-based thresholds
-    ARM_SEC     = float(os.getenv("ARM_SEC", "1.5"))
-    ZERO_UP_SEC = float(os.getenv("ZERO_UP_SEC", "2.0"))
-
-    armed = False
-    arm_start_ts = None
-    arm_elapsed = 0.0
-
-    zero_up_start_ts = None
-    zero_elapsed = 0.0
-
-    peak_up = 0
     init_card_detect_sent = False
 
     global _last_obs, _same_streak
@@ -714,7 +649,7 @@ def main():
         if not ok:
             time.sleep(SLEEP_SEC)
             if frame_idx % DASH_EVERY_N == 0:
-                render_dashboard(0, 0, armed, arm_elapsed, zero_elapsed, peak_up, cur_codes=[])
+                render_dashboard(0, 0, cur_codes=[])
             frame_idx += 1
             continue
 
@@ -762,64 +697,16 @@ def main():
 
         face_up_now = slots.faceup_count()
         cards_now   = len(cards)
-        peak_up     = max(peak_up, face_up_now)
         det_codes   = slots.codes_list()
 
-        def _codes_for_tablet(armed_flag: bool, fu_now: int, codes_now):
-            if fu_now == 0:
-                return []  # explicit zero
-            if armed_flag:
-                return list(codes_now)
-            return list(codes_now) if fu_now >= ARM_FACEUP_MIN else None
-
-        # EARLY NOTIFY on any count change
-        if (armed and face_up_now != prev_count) or (not armed and face_up_now >= ARM_FACEUP_MIN and face_up_now != prev_count):
-            send_cards_change_or_every(face_up_now, codes=_codes_for_tablet(armed, face_up_now, det_codes))
-
-        # ---- seconds-based arming & reset ----
-        if not armed:
-            if face_up_now >= ARM_FACEUP_MIN:
-                if arm_start_ts is None:
-                    arm_start_ts = now
-                arm_elapsed = now - arm_start_ts
-                if arm_elapsed >= ARM_SEC:
-                    armed = True
-                    send_cards_change_or_every(face_up_now, codes=_codes_for_tablet(True, face_up_now, det_codes))
-                    zero_up_start_ts = None
-                    zero_elapsed = 0.0
-                    peak_up = face_up_now
-                    log_event(f"STATE -> ARMED ({ARM_FACEUP_MIN}+ for {ARM_SEC:.1f}s)")
-            else:
-                arm_start_ts = None
-                arm_elapsed = 0.0
-        else:
-            if face_up_now == 0:
-                if zero_up_start_ts is None:
-                    zero_up_start_ts = now
-                zero_elapsed = now - zero_up_start_ts
-            else:
-                zero_up_start_ts = None
-                zero_elapsed = 0.0
-
-            if ZERO_UP_SEC > 0 and zero_elapsed >= ZERO_UP_SEC:
-                log_event(f"STATE -> RESET (zero-up for {ZERO_UP_SEC:.1f}s, peak={peak_up})")
-                send_cards_change_or_every(0, codes=[])  # explicit zero
-                # NEW: notify tablet that the hand/deal is complete
-                send_deal_completed_reliably()
-                armed = False
-                arm_start_ts = None
-                arm_elapsed = 0.0
-                zero_up_start_ts = None
-                zero_elapsed = 0.0
-                peak_up = 0
-                det_codes = []
-                slots.clear()
-            else:
-                send_cards_change_or_every(face_up_now, codes=_codes_for_tablet(armed, face_up_now, det_codes))
+        # Send card updates whenever the count changes
+        if face_up_now != prev_count:
+            codes_to_send = list(det_codes) if face_up_now > 0 else []
+            send_cards_change_or_every(face_up_now, codes=codes_to_send)
 
         # ---- background classification for UNKNOWN slots ----
         improved = False
-        if face_up_now >= ARM_FACEUP_MIN:
+        if face_up_now > 0:
             unk_count = sum(1 for s in slots.slots if s and s.get("code") == "UNK")
             for i, s in enumerate(slots.slots):
                 if s is None: continue
@@ -868,13 +755,13 @@ def main():
                         log_event(f"✗ Slot {idx}: {code or 'None'} (score={score:.3f}, need {CLASSIFY_THRESH}) [BG]")
 
         det_codes = slots.codes_list()
-        if improved and (armed or face_up_now >= ARM_FACEUP_MIN) and face_up_now > 0:
+        if improved and face_up_now > 0:
             _send_cards_to_hub(face_up_now, codes=list(det_codes))
             log_event(f"codes_update -> {face_up_now}")
             _last_obs = face_up_now; _same_streak = 0
 
         if frame_idx % DASH_EVERY_N == 0:
-            render_dashboard(face_up_now, cards_now, armed, arm_elapsed, zero_elapsed, peak_up, cur_codes=det_codes)
+            render_dashboard(face_up_now, cards_now, cur_codes=det_codes)
 
         if SHOW_PREVIEW:
             cv2.imshow("Card Detector", frame)
