@@ -194,8 +194,11 @@ def main():
         return
     
     try:
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        # Configure for Razer Kiyo Ultra 4K - MJPG codec works reliably on macOS
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 3840)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 2160)
+        cap.set(cv2.CAP_PROP_FPS, 24)
     except Exception:
         pass
     

@@ -723,6 +723,8 @@ def main():
         print(str(e)); return
 
     init_card_detect_sent = False
+    last_periodic_send = time.time()
+    PERIODIC_SEND_INTERVAL = 5.0  # Send cards_detected every 5 seconds
 
     global _last_obs, _same_streak
     _last_obs = None; _same_streak = 0
@@ -853,6 +855,11 @@ def main():
             _send_cards_to_hub(face_up_now, codes=list(det_codes))
             log_event(f"codes_update -> {face_up_now}")
             _last_obs = face_up_now; _same_streak = 0
+
+        # Periodic send every 5 seconds (even if nothing changed)
+        if now - last_periodic_send >= PERIODIC_SEND_INTERVAL:
+            _send_cards_to_hub(face_up_now, codes=list(det_codes))
+            last_periodic_send = now
 
         if frame_idx % DASH_EVERY_N == 0:
             render_dashboard(face_up_now, cards_now, cur_codes=det_codes)

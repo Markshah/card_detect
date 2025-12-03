@@ -343,6 +343,7 @@ def _best_match(gwarp):
     small_ranks = {R1, R2}.issubset({"2","3","4","5"})  # Include rank 5
     medium_ranks = {R1, R2}.issubset({"4","5","6","7"})  # Ranks that can be confused
     red_suit_confusion = {S1, S2} == {"H", "D"}  # Hearts vs Diamonds confusion
+    clubs_diamonds_confusion = {S1, S2} == {"C", "D"}  # Clubs vs Diamonds confusion
 
     # Case 1: Same rank, different suit (especially H vs D) - use suit center ROI
     if close and same_rank and different_suit and red_suit_confusion:
@@ -355,6 +356,18 @@ def _best_match(gwarp):
             return c2, float(s2)
         # else fall through to c1
     
+    # Case 1b: Same rank, Clubs vs Diamonds confusion - use suit center ROI with tighter threshold
+    elif close and same_rank and different_suit and clubs_diamonds_confusion:
+        suit_rect = _suit_center_roi_rect(H, W)
+        gs1 = _roi(g1, suit_rect); ts1 = _roi(t1, suit_rect)
+        gs2 = _roi(g2, suit_rect); ts2 = _roi(t2, suit_rect)
+        s1s = cv2.matchTemplate(gs1, ts1, cv2.TM_CCOEFF_NORMED)[0][0]
+        s2s = cv2.matchTemplate(gs2, ts2, cv2.TM_CCOEFF_NORMED)[0][0]
+        # Use slightly larger threshold for C vs D since they can be harder to distinguish
+        if s2s > s1s + 0.005:  # 0.5% difference threshold
+            return c2, float(s2)
+        # else fall through to c1
+    
     # Case 2: Same rank, different suit (general case) - use suit center ROI
     elif close and same_rank and different_suit:
         suit_rect = _suit_center_roi_rect(H, W)
@@ -362,7 +375,8 @@ def _best_match(gwarp):
         gs2 = _roi(g2, suit_rect); ts2 = _roi(t2, suit_rect)
         s1s = cv2.matchTemplate(gs1, ts1, cv2.TM_CCOEFF_NORMED)[0][0]
         s2s = cv2.matchTemplate(gs2, ts2, cv2.TM_CCOEFF_NORMED)[0][0]
-        if s2s > s1s + 1e-4:
+        # Use a more robust threshold - require at least 0.3% difference to switch
+        if s2s > s1s + 0.003:
             return c2, float(s2)
     
     # Case 3: Same suit, different rank (e.g., 5H vs 6H) - use rank corner ROI
