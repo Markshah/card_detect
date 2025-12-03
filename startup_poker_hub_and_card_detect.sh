@@ -11,18 +11,18 @@ DETECT_CMD="source .venv/bin/activate; export HUB_WS_URL=ws://192.168.1.54:8888;
 # ===== Launch in Terminal.app (same window, new tabs) =====
 osascript <<EOF
 tell application "Terminal"
-    # --- Tab 1: Card Detector ---
-    do script "cd ${PROJECT_DIR}; echo '=== CARD DETECTOR ==='; ${DETECT_CMD}"
-    delay 1
+    # --- Tab 1: Poker Hub (start first so Card Detector can connect) ---
+    do script "cd ${PROJECT_DIR}; echo '=== POKER HUB ==='; ${HUB_CMD}"
+    delay 2
     set custom title of front window to "PokerHub"
-    set custom title of selected tab of front window to "CardDetector"
+    set custom title of selected tab of front window to "PokerHub"
 
-    # --- Tab 2: Poker Hub (will be active since it's created last) ---
+    # --- Tab 2: Card Detector (start after Hub is running) ---
     tell application "System Events" to tell process "Terminal" to keystroke "t" using command down
     delay 0.5
-    do script "cd ${PROJECT_DIR}; echo '=== POKER HUB ==='; ${HUB_CMD}" in selected tab of front window
+    do script "cd ${PROJECT_DIR}; echo '=== CARD DETECTOR ==='; sleep 2; ${DETECT_CMD}" in selected tab of front window
     delay 1
-    set custom title of selected tab of front window to "PokerHub"
+    set custom title of selected tab of front window to "CardDetector"
 
     activate
 end tell

@@ -179,6 +179,7 @@ class HubServer:
         self.sb = serial_bridge
         self.clients_all = set()
         self.role_by_client = {}
+        self.name_by_client = {}  # Track client names
         self.clients_lock = asyncio.Lock()
         self.serial_to_ws_q: asyncio.Queue[str] = asyncio.Queue(maxsize=512)
         self._wire = wire
@@ -221,9 +222,31 @@ class HubServer:
         async def _health(_req):
             return web.Response(text="ok")
 
+        async def _status(_req):
+            async with self.clients_lock:
+                total_clients = len(self.clients_all)
+                tablets = len([c for c, r in self.role_by_client.items() if r == ROLE_TABLET])
+                detectors = len([c for c, r in self.role_by_client.items() if r == ROLE_DETECTOR])
+                # Build list of clients with their names and roles
+                clients_list = []
+                for ws in self.clients_all:
+                    role = self.role_by_client.get(ws, ROLE_UNKNOWN)
+                    name = self.name_by_client.get(ws, None)
+                    clients_list.append({
+                        "role": role,
+                        "name": name
+                    })
+            return web.json_response({
+                "total_clients": total_clients,
+                "tablets": tablets,
+                "detectors": detectors,
+                "clients": clients_list
+            })
+
         app.add_routes([
             web.get("/health", _health),
             web.get("/healthz", _health),
+            web.get("/status", _status),
         ])
 
         self._http_runner = web.AppRunner(app)
@@ -397,6 +420,7 @@ class HubServer:
         async with self.clients_lock:
             self.clients_all.add(ws)
             self.role_by_client[ws] = ROLE_UNKNOWN
+            self.name_by_client[ws] = None
 
         try:
             async for text in ws:
@@ -413,8 +437,14 @@ class HubServer:
 
                 if j.get("command") == "hello":
                     await self._set_role(ws, j.get("role", ROLE_UNKNOWN))
+                    # Store client name if provided
+                    client_name = j.get("name")
+                    if client_name:
+                        async with self.clients_lock:
+                            self.name_by_client[ws] = str(client_name).strip()
                     if self._wire:
-                        log.info("HUB: role set to %s for %s", await self._get_role(ws), peer)
+                        name_str = f" ({self.name_by_client.get(ws, 'unnamed')})" if self.name_by_client.get(ws) else ""
+                        log.info("HUB: role set to %s%s for %s", await self._get_role(ws), name_str, peer)
                     continue
 
                 role = await self._get_role(ws)
@@ -470,6 +500,7 @@ class HubServer:
             async with self.clients_lock:
                 self.clients_all.discard(ws)
                 self.role_by_client.pop(ws, None)
+                self.name_by_client.pop(ws, None)
             log.info(f"Client disconnected: {peer}")
 
     def _infer_role_from_message(self, j: dict) -> str:
@@ -496,6 +527,7 @@ class HubServer:
                     for ws in dead:
                         self.clients_all.discard(ws)
                         self.role_by_client.pop(ws, None)
+                        self.name_by_client.pop(ws, None)
         else:
             if self._wire:
                 log.warning("HUB→TAB: No tablets connected, dropping %s", trunc(line))
@@ -527,6 +559,7 @@ class HubServer:
                     for ws in dead:
                         self.clients_all.discard(ws)
                         self.role_by_client.pop(ws, None)
+                        self.name_by_client.pop(ws, None)
 
 # --------------------------
 # Entrypoint

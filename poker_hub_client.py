@@ -24,6 +24,8 @@ class WSManager:
         retry_delay: float = 3.0,
         on_event=None,
         name: str | None = None,
+        role: str | None = None,
+        client_name: str | None = None,
     ):
         self.url = url
         self.max_retries = max_retries   # 0 = retry forever
@@ -31,6 +33,8 @@ class WSManager:
 
         self._on_event = on_event
         self._name = name or url
+        self._client_role = role  # Role for hello message (e.g., "detector", "tablet")
+        self._client_name = client_name  # Client name for hello message (e.g., "emulator", "tablet")
 
         self._ws = None
         self._thread = None
@@ -194,6 +198,17 @@ class WSManager:
         self._last_rx_ts = time.time()
         log.info("WebSocket opened: %s", self.url)
         self._emit(f"[WS {self._name}] OPEN")
+        # Send hello message with role and name if configured
+        if hasattr(self, '_client_role') or hasattr(self, '_client_name'):
+            hello_msg = {"command": "hello"}
+            if hasattr(self, '_client_role'):
+                hello_msg["role"] = self._client_role
+            if hasattr(self, '_client_name'):
+                hello_msg["name"] = self._client_name
+            try:
+                self.send_json(hello_msg)
+            except Exception:
+                pass  # Ignore errors, connection just opened
 
     def _on_message(self, ws, msg):
         self._last_rx_ts = time.time()

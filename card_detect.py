@@ -116,6 +116,9 @@ USE_GRAYSCALE_ONLY = int(os.getenv("USE_GRAYSCALE_ONLY","1"))
 
 # ---------------- dashboard helpers (make sure events exists before log_event!) ----------------
 events = deque(maxlen=DASH_ROWS)
+hub_client_count = 0  # Cached client count from hub
+hub_client_count_ts = 0  # Timestamp of last fetch
+
 def log_event(s: str):
     ts = time.strftime("%H:%M:%S"); events.appendleft(f"{ts}  {s}")
 
@@ -123,7 +126,43 @@ def log_event(s: str):
 from poker_hub_client import WSManager
 HUB_WS_URL = os.getenv("HUB_WS_URL", "ws://192.168.1.54:8888").strip()
 
-ws_hub = WSManager(url=HUB_WS_URL, on_event=log_event, name="Hub")
+hub_client_info = None  # Cached client info from hub
+hub_client_info_ts = 0  # Timestamp of last fetch
+
+def _fetch_hub_client_count():
+    """Fetch client count and info from hub HTTP status endpoint. Returns (count, clients_list) or (None, None) on error."""
+    global hub_client_count, hub_client_count_ts, hub_client_info, hub_client_info_ts
+    try:
+        import urllib.request
+        import json
+        # Extract host:port from WS URL (e.g., ws://192.168.1.54:8888 -> http://192.168.1.54:8787)
+        ws_url = HUB_WS_URL.replace("ws://", "http://").replace("wss://", "https://")
+        # Use HTTP bridge port (default 8787)
+        http_port = int(os.getenv("HTTP_BRIDGE_PORT", "8787"))
+        if ":" in ws_url:
+            host = ws_url.split("://")[1].split(":")[0]
+            status_url = f"http://{host}:{http_port}/status"
+        else:
+            status_url = f"http://{ws_url.split('://')[1]}:{http_port}/status"
+        
+        with urllib.request.urlopen(status_url, timeout=1.0) as response:
+            data = json.loads(response.read().decode())
+            count = data.get("total_clients", 0)
+            clients_list = data.get("clients", [])
+            hub_client_count = count
+            hub_client_info = clients_list
+            hub_client_count_ts = time.time()
+            hub_client_info_ts = time.time()
+            return count, clients_list
+    except Exception:
+        # On error, return cached value if recent (within 10 seconds)
+        if time.time() - hub_client_info_ts < 10:
+            return hub_client_count, hub_client_info
+        return None, None
+
+# Get client name from env or default to "detector"
+CLIENT_NAME = os.getenv("CLIENT_NAME", "detector").strip()
+ws_hub = WSManager(url=HUB_WS_URL, on_event=log_event, name="Hub", role="detector", client_name=CLIENT_NAME)
 
 def _attach_hub_send_logger():
     import json as _json
@@ -155,7 +194,17 @@ if QUIET_LOGS:
 
 def render_dashboard(face_up_now, cards_now, cur_codes):
     import sys
-    sys.stdout.write("\033[2J\033[H")
+    # Clear screen and move cursor to top-left for in-place updates
+    # Use escape sequences to clear screen and reset cursor position
+    if sys.stdout.isatty():
+        # Flush first to ensure previous output is written
+        sys.stdout.flush()
+        # Clear entire screen (\033[2J) and move cursor to home (\033[H)
+        sys.stdout.write("\033[2J\033[H")
+        sys.stdout.flush()
+    else:
+        # If not a TTY, just print a separator line
+        print("\n" + "=" * 72 + "\n")
 
     DASH_BIGTEXT = int(os.getenv("DASH_BIGTEXT","0"))
     dash_rows    = int(os.getenv("DASH_ROWS","5"))
@@ -165,6 +214,34 @@ def render_dashboard(face_up_now, cards_now, cur_codes):
     h_ok = ws_hub.is_connected
     h_color = GREEN if h_ok else RED
     print(f"{BOLD}Hub    : {h_color}{HUB_WS_URL}{RESET}   [{h_color}{'UP' if h_ok else 'DOWN'}{RESET}]")
+    
+    # Fetch and display client count and names
+    client_count, clients_list = _fetch_hub_client_count()
+    if client_count is not None:
+        count_color = GREEN if client_count > 0 else GRAY
+        print(f"{BOLD}Clients : {count_color}{client_count}{RESET}", end="")
+        # Show client names if available
+        if clients_list:
+            names = []
+            for client in clients_list:
+                name = client.get("name")
+                role = client.get("role", "unknown")
+                # Use name if available, otherwise use role
+                if name:
+                    # Rename "detector" name to "Card Detector" for display
+                    display_name = "Card Detector" if name.lower() == "detector" else name
+                else:
+                    # Rename "detector" role to "Card Detector" for display
+                    display_name = "Card Detector" if role == "detector" else role
+                names.append(display_name)
+            if names:
+                print(f"  {GRAY}[{', '.join(names)}]{RESET}")
+            else:
+                print()
+        else:
+            print()
+    else:
+        print(f"{BOLD}Clients : {GRAY}?{RESET}")
 
     pretty_codes = "  ".join(cur_codes[:5]) if cur_codes else ""
     if DASH_BIGTEXT and pretty_codes:
