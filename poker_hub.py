@@ -436,12 +436,35 @@ class HubServer:
                     continue
 
                 if j.get("command") == "hello":
-                    await self._set_role(ws, j.get("role", ROLE_UNKNOWN))
+                    role = j.get("role", ROLE_UNKNOWN)
+                    await self._set_role(ws, role)
                     # Store client name if provided
                     client_name = j.get("name")
                     if client_name:
+                        client_name = str(client_name).strip()
+                        # Deduplicate: find and close any existing connection with same name and role
+                        role_lower = role.lower()
+                        duplicates_to_close = []
                         async with self.clients_lock:
-                            self.name_by_client[ws] = str(client_name).strip()
+                            self.name_by_client[ws] = client_name
+                            for existing_ws in list(self.clients_all):
+                                if existing_ws != ws:
+                                    existing_role = self.role_by_client.get(existing_ws, "").lower()
+                                    existing_name = self.name_by_client.get(existing_ws, "")
+                                    if existing_name == client_name and existing_role == role_lower:
+                                        duplicates_to_close.append(existing_ws)
+                        # Close duplicates outside the lock to avoid blocking
+                        for dup_ws in duplicates_to_close:
+                            log.info(f"Closing duplicate connection: {client_name} ({role})")
+                            try:
+                                await dup_ws.close(1000, "Duplicate connection")
+                            except Exception:
+                                pass
+                            # Clean up
+                            async with self.clients_lock:
+                                self.clients_all.discard(dup_ws)
+                                self.role_by_client.pop(dup_ws, None)
+                                self.name_by_client.pop(dup_ws, None)
                     if self._wire:
                         name_str = f" ({self.name_by_client.get(ws, 'unnamed')})" if self.name_by_client.get(ws) else ""
                         log.info("HUB: role set to %s%s for %s", await self._get_role(ws), name_str, peer)

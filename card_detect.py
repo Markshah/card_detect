@@ -170,13 +170,27 @@ def _attach_hub_send_logger():
     def _wrapped(payload: dict) -> bool:
         ok = _orig(payload)
         cmd = payload.get("command") if isinstance(payload, dict) else None
-        try:
-            body = _json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
-        except Exception:
-            body = str(payload)
-        if len(body) > 200:
-            body = body[:200] + "…"
-        log_event(f"[WS→HUB] cmd={cmd or '?'} ok={ok} connected={ws_hub.is_connected} payload={body}")
+        
+        # Special formatting for cards_detected to avoid long lines
+        if cmd == "cards_detected" and isinstance(payload, dict):
+            data = payload.get("data", {})
+            count = data.get("count", 0)
+            codes = data.get("codes", [])
+            codes_str = ",".join(codes[:5])  # Show first 5 codes
+            if len(codes) > 5:
+                codes_str += f"...({len(codes)} total)"
+            status = "sent" if ok else "failed"
+            log_event(f"[WS→HUB] cards_detected: count={count} codes=[{codes_str}] {status}")
+        else:
+            # For other commands, use compact format
+            try:
+                body = _json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+            except Exception:
+                body = str(payload)
+            if len(body) > 150:
+                body = body[:150] + "…"
+            status = "sent" if ok else "failed"
+            log_event(f"[WS→HUB] cmd={cmd or '?'} {status} payload={body}")
         return ok
     ws_hub.send_json = _wrapped
 
@@ -657,8 +671,11 @@ class FrameSource:
             self.cap = cv2.VideoCapture(camera_index)
             if not self.cap.isOpened(): raise RuntimeError("[ERROR] camera not found / cannot open")
             try:
-                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1280)
-                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+                # Configure for Razer Kiyo Ultra 4K - MJPG codec works reliably on macOS
+                self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  3840)
+                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 2160)
+                self.cap.set(cv2.CAP_PROP_FPS, 24)
             except Exception: pass
     def read(self):
         if not self.use_files: return self.cap.read()
