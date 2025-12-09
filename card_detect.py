@@ -53,6 +53,10 @@ DEBUG_DIR    = os.getenv("DEBUG_DUMP_DIR", "./debug")
 DRAW_STATS   = _b("DRAW_LABEL_STATS","1")
 WARP_SIZE    = (int(os.getenv("WARP_W","400")), int(os.getenv("WARP_H","560")))
 
+# ---- processing resolution (downscale from capture resolution for speed) ----
+PROC_WIDTH   = int(os.getenv("PROC_WIDTH", "0"))   # 0 = no downscale, 1920 = 1080p, 1280 = 720p
+PROC_HEIGHT  = int(os.getenv("PROC_HEIGHT", "0"))  # 0 = no downscale, 1080 = 1080p, 720 = 720p
+
 # ---- SIM MODE ----
 SIM              = int(os.getenv("SIM","0"))
 SIM_INTERVAL_SEC = float(os.getenv("SIM_INTERVAL_SEC","12"))
@@ -577,7 +581,16 @@ class SlotTracker:
     def faceup_count(self):
         return sum(1 for s in self.slots if s is not None)
     def codes_list(self):
-        return [s["code"] for s in self.slots if s is not None]
+        # Deduplicate codes - same card should never appear twice
+        codes_seen = set()
+        result = []
+        for s in self.slots:
+            if s is None: continue
+            code = s.get("code")
+            if code and code != "UNK" and code not in codes_seen:
+                codes_seen.add(code)
+                result.append(code)
+        return result
     def codes_list_fixed5(self):
         return [s["code"] if s else "UNK" for s in self.slots]
     def update_from_detections(self, detections, frame_idx):
@@ -635,6 +648,29 @@ class SlotTracker:
         if s is None: return False
         prev = s["code"]
         prev_score = s.get("score", 0.0) or 0.0
+        
+        # Prevent duplicate codes across slots - if this code already exists in another slot,
+        # check if we should swap (new one is much better) or reject
+        if code and code != "UNK":
+            for i, other_slot in enumerate(self.slots):
+                if i == slot_idx or other_slot is None: continue
+                other_code = other_slot.get("code")
+                if other_code == code:
+                    other_score = other_slot.get("score", 0.0) or 0.0
+                    # If new score is significantly better, swap the codes (old slot becomes UNK)
+                    if score is not None and score > other_score + 0.25:
+                        # New classification is much better - swap them
+                        other_slot["code"] = "UNK"
+                        other_slot["score"] = 0.0
+                        log_event(f"⚠️  Duplicate {code}: swapped slot {i}→UNK, slot {slot_idx}→{code} (scores: {other_score:.3f}→{score:.3f})")
+                        break  # Continue to accept this code
+                    # Only override if new score is much better (0.20 margin to prevent duplicates)
+                    elif score is None or score <= other_score + 0.20:
+                        # Reject - code already exists with similar/better score
+                        # Slot will keep trying to classify, might get a different card
+                        if prev == "UNK":  # Log when rejecting for UNK slot (will retry)
+                            log_event(f"⚠️  Duplicate {code} rejected for slot {slot_idx} (exists in slot {i} score {other_score:.3f}, new {score:.3f}) - will retry")
+                        return False  # Reject - code already exists with similar/better score
         
         # Only update if:
         # 1. Previous was UNK and we have a code, OR
@@ -756,6 +792,15 @@ def main():
 
         # ---- preprocess ----
         proc, offx, offy = _roi(frame, ROI) if sum(ROI) != 0 else (frame, 0, 0)
+        
+        # Downscale for faster processing (if PROC_WIDTH/HEIGHT are set)
+        scale_factor = 1.0
+        if PROC_WIDTH > 0 and PROC_HEIGHT > 0:
+            orig_h, orig_w = proc.shape[:2]
+            if orig_w != PROC_WIDTH or orig_h != PROC_HEIGHT:
+                proc = cv2.resize(proc, (PROC_WIDTH, PROC_HEIGHT), interpolation=cv2.INTER_AREA)
+                scale_factor = PROC_WIDTH / float(orig_w)
+        
         gray = cv2.cvtColor(proc, cv2.COLOR_BGR2GRAY)
         norm = _normalize_L(gray)
         _, th = cv2.threshold(norm, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
