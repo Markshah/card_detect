@@ -118,6 +118,10 @@ SLOT_FORGET_FRAMES = int(os.getenv("SLOT_FORGET_FRAMES", "8"))
 RESEND_EVERY       = int(os.getenv("RESEND_EVERY", "5"))
 USE_GRAYSCALE_ONLY = int(os.getenv("USE_GRAYSCALE_ONLY","1"))
 
+# ---- classification throttling ----
+CLASSIFY_EVERY_N   = int(os.getenv("CLASSIFY_EVERY_N", "2"))  # Only classify every Nth frame (1=every frame, 2=every other, etc)
+SKIP_IF_ALL_IDENTIFIED = int(os.getenv("SKIP_IF_ALL_IDENTIFIED", "1"))  # Skip classification if all cards identified
+
 # ---------------- dashboard helpers (make sure events exists before log_event!) ----------------
 events = deque(maxlen=DASH_ROWS)
 hub_client_count = 0  # Cached client count from hub
@@ -814,10 +818,17 @@ def main():
 
         # ---- detect cards ----
         cards = []
+        max_cards_to_find = 5  # Early exit optimization - stop after finding 5 face-up cards
+        face_up_found = 0
         for cnt in _card_candidates(th, proc.shape[1], proc.shape[0]):
             warp, box, (mw, mh) = _warp_from_contour(proc, cnt)
             label, info, panel = classify_by_white_rim(warp)
             cards.append((label, info, box, panel, warp))
+            if label == "face_up":
+                face_up_found += 1
+                # Early exit if we already found max cards (saves processing time)
+                if face_up_found >= max_cards_to_find:
+                    break
 
         # ---- build detections for SLOT tracker (only face-up) ----
         detections = []
@@ -847,13 +858,36 @@ def main():
 
         # ---- background classification for UNKNOWN slots ----
         improved = False
-        if face_up_now > 0:
+        
+        # Skip classification if all cards are identified (optimization)
+        should_classify = True
+        all_identified = False
+        if SKIP_IF_ALL_IDENTIFIED and face_up_now > 0:
+            all_identified = True
+            for s in slots.slots:
+                if s is None: continue
+                if s.get("code") == "UNK" or (s.get("score", 0.0) or 0.0) < 0.60:
+                    all_identified = False
+                    break
+            if all_identified:
+                # All cards identified - check less frequently but still check (every 3x normal interval)
+                # Also do a full re-check every 30 frames to catch misclassifications
+                should_classify = (frame_idx % (CLASSIFY_EVERY_N * 3) == 0) or (frame_idx % 30 == 0)
+            else:
+                # Only classify every Nth frame (throttling optimization)
+                should_classify = (frame_idx % CLASSIFY_EVERY_N == 0)
+        
+        if should_classify and face_up_now > 0:
             unk_count = sum(1 for s in slots.slots if s and s.get("code") == "UNK")
+            # Periodic full re-check: every 30 frames, check all cards regardless of confidence
+            do_full_recheck = (frame_idx % 30 == 0)
+            
             for i, s in enumerate(slots.slots):
                 if s is None: continue
                 # Classify UNK slots, or re-classify low-confidence matches (might be wrong)
                 current_score = s.get("score", 0.0) or 0.0
-                if s["code"] != "UNK" and current_score >= 0.65:
+                # Skip high-confidence matches UNLESS doing periodic full re-check
+                if s["code"] != "UNK" and current_score >= 0.65 and not do_full_recheck:
                     continue  # Skip high-confidence matches (don't waste time re-classifying)
                 warp = s.get("warp")
                 if warp is None: continue
@@ -878,6 +912,7 @@ def main():
                             import traceback
                             traceback.print_exc()
                         continue
+            # Process background worker results (only if we're classifying this frame)
             if BG_CLASSIFY and workers:
                 all_results = workers.fetch_all()
                 if all_results and frame_idx % 20 == 0:
