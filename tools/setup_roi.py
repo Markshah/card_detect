@@ -8,8 +8,16 @@ import cv2
 import os
 import sys
 import time
+from pathlib import Path
+
+# Get project root directory (parent of tools/)
+PROJECT_ROOT = Path(__file__).parent.parent
 
 # Load camera index from env
+env_path = PROJECT_ROOT / "env"
+if env_path.exists():
+    from dotenv import load_dotenv
+    load_dotenv(env_path)
 CAMERA_INDEX = int(os.getenv("CAMERA_INDEX", "0"))
 
 # ROI selection state
@@ -96,9 +104,9 @@ def main():
     cv2.setMouseCallback(window_name, mouse_callback)
     
     # Load existing ROI from env if available
-    env_file = os.path.join(os.path.dirname(__file__), "env")
+    env_file = PROJECT_ROOT / "env"
     existing_roi = "0,0,0,0"
-    if os.path.exists(env_file):
+    if env_file.exists():
         with open(env_file, 'r') as f:
             for line in f:
                 if line.strip().startswith("ROI="):
@@ -202,7 +210,7 @@ def main():
                 roi_str = f"{x},{y},{w_roi},{h_roi}"
                 
                 # Update env file
-                if os.path.exists(env_file):
+                if env_file.exists():
                     with open(env_file, 'r') as f:
                         lines = f.readlines()
                     

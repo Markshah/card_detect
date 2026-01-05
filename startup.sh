@@ -5,8 +5,8 @@ cd "$(dirname "$0")"
 PROJECT_DIR="$(pwd)"
 
 # ===== Commands =====
-HUB_CMD="source .venv/bin/activate; python poker_hub.py --serial /dev/tty.usbmodem48CA435C84242 --wire"
-DETECT_CMD="source .venv/bin/activate; export HUB_WS_URL=ws://192.168.1.54:8888; python card_detect.py"
+HUB_CMD="source .venv/bin/activate; python app/poker_hub.py --serial /dev/tty.usbmodem48CA435C84242 --wire"
+DETECT_CMD="source .venv/bin/activate; export HUB_WS_URL=ws://192.168.1.54:8888; python app/card_detect.py"
 
 # ===== Launch in Terminal.app (same window, new tabs) =====
 osascript <<EOF

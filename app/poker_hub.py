@@ -9,8 +9,8 @@ Routing rules:
 - ARDUINO   -> TABLET only
 
 Run examples:
-  python poker_hub.py --serial /dev/tty.usbmodem48CA435C84242 --wire
-  python poker_hub.py --ws-port 8888 --baud 115200 --wire
+  python app/poker_hub.py --serial /dev/tty.usbmodem48CA435C84242 --wire
+  python app/poker_hub.py --ws-port 8888 --baud 115200 --wire
 
 Env (optional):
   WS_HOST=0.0.0.0

@@ -8,18 +8,23 @@ import cv2
 import os
 import numpy as np
 import time
+from pathlib import Path
 from dotenv import load_dotenv
 
+# Get project root directory (parent of tools/)
+PROJECT_ROOT = Path(__file__).parent.parent
+
 # Load env
-if os.path.exists("env"):
-    load_dotenv("env")
+env_path = PROJECT_ROOT / "env"
+if env_path.exists():
+    load_dotenv(env_path)
 
 CAMERA_INDEX = int(os.getenv("CAMERA_INDEX", "0"))
 ROI = tuple(int(p or "0") for p in os.getenv("ROI", "0,0,0,0").split(",")[:4]) if os.getenv("ROI") else (0,0,0,0)
 WARP_W = int(os.getenv("WARP_W", "500"))
 WARP_H = int(os.getenv("WARP_H", "700"))
 
-TEMPL_DIR = os.getenv("CARD_FULL_TEMPL_DIR", "./templates")
+TEMPL_DIR = Path(os.getenv("CARD_FULL_TEMPL_DIR", str(PROJECT_ROOT / "templates")))
 os.makedirs(TEMPL_DIR, exist_ok=True)
 
 def _roi(frame, r):

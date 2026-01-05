@@ -5,7 +5,7 @@ cd "$(dirname "$0")"
 PROJECT_DIR="$(pwd)"
 
 # ===== Commands =====
-HUB_CMD="source .venv/bin/activate; python poker_hub.py --serial /dev/tty.usbmodem48CA435C84242 --wire"
+HUB_CMD="source .venv/bin/activate; python app/poker_hub.py --serial /dev/tty.usbmodem48CA435C84242 --wire"
 
 # ===== Launch in Terminal.app (new window) =====
 osascript <<EOF

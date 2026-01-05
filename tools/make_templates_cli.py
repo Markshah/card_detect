@@ -5,21 +5,26 @@ from pathlib import Path
 import subprocess
 import argparse
 
+# Get project root directory (parent of tools/)
+PROJECT_ROOT = Path(__file__).parent.parent
+
 # Load environment variables - prioritize template-specific env, but fall back to main env for WARP_W/H
 # This ensures WARP_W/H stay in sync with card_detect.py while allowing other settings to differ
 try:
     from dotenv import load_dotenv
     # Load main env first (for WARP_W/H consistency)
-    if os.path.exists("env"):
-        load_dotenv("env")
+    env_path = PROJECT_ROOT / "env"
+    if env_path.exists():
+        load_dotenv(env_path)
     # Load template-specific env if it exists (overrides for template-specific settings)
-    if os.path.exists("env_templates"):
-        load_dotenv("env_templates", override=False)  # Don't override WARP_W/H from main env
+    env_templates_path = PROJECT_ROOT / "env_templates"
+    if env_templates_path.exists():
+        load_dotenv(env_templates_path, override=False)  # Don't override WARP_W/H from main env
 except Exception:
     pass
 
-OUT_DIR  = Path("./templates_temp")
-TEMPL_DIR = Path("./templates")  # Existing templates folder
+OUT_DIR  = PROJECT_ROOT / "templates_temp"
+TEMPL_DIR = PROJECT_ROOT / "templates"  # Existing templates folder
 # WARP_W/H must match card_detect.py - read from main env file
 SIZE     = (int(os.getenv("WARP_W","400")), int(os.getenv("WARP_H","560")))
 CAMERA_INDEX = int(os.getenv("CAMERA_INDEX", "0"))
